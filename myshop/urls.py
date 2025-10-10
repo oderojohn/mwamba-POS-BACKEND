@@ -16,7 +16,6 @@ Including another URLconf
 """
 from django.contrib import admin
 from django.urls import path, include
-from suppliers.views import PurchaseOrderViewSet
 from suppliers.views import SupplierPriceHistoryViewSet
 from inventory.views import ProductViewSet
 from suppliers.views import SupplierViewSet
@@ -35,8 +34,6 @@ urlpatterns = [
     path('api/products/<int:pk>/', ProductViewSet.as_view({'get': 'retrieve', 'put': 'update', 'delete': 'destroy'})),
     path('api/suppliers/', SupplierViewSet.as_view({'get': 'list', 'post': 'create'})),
     path('api/suppliers/<int:pk>/', SupplierViewSet.as_view({'get': 'retrieve', 'put': 'update', 'delete': 'destroy'})),
-    path('api/purchase-orders/', PurchaseOrderViewSet.as_view({'get': 'list', 'post': 'create'})),
-    path('api/purchase-orders/<int:pk>/', PurchaseOrderViewSet.as_view({'get': 'retrieve', 'put': 'update', 'delete': 'destroy'})),
     path('api/', include('sales.urls')),
     path('api/payments/', include('payments.urls')),
     path('api/customers/', include('customers.urls')),

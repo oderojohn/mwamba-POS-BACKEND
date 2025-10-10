@@ -56,7 +56,7 @@ class PurchaseOrder(models.Model):
 
     def update_status(self):
         """Update order status based on received items"""
-        items = self.purchaseorderitem_set.all()
+        items = self.items.all()
         if not items.exists():
             self.status = 'pending'
         else:

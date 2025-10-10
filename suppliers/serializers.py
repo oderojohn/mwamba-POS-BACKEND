@@ -31,8 +31,15 @@ class PurchaseOrderSerializer(serializers.ModelSerializer):
         model = PurchaseOrder
         fields = '__all__'
 
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        # Make all fields not required for partial updates
+        if getattr(self, 'partial', False):
+            for field_name, field in self.fields.items():
+                field.required = False
+
     def create(self, validated_data):
-        items_data = self.context['request'].data.get('items', [])
+        items_data = self.initial_data.get('items', [])
         purchase_order = super().create(validated_data)
 
         # Create order items
@@ -51,3 +58,41 @@ class PurchaseOrderSerializer(serializers.ModelSerializer):
         purchase_order.save()
 
         return purchase_order
+
+    def update(self, instance, validated_data):
+        # Handle status-only updates (like approving orders)
+        if 'status' in validated_data and len(validated_data) == 1:
+            instance.status = validated_data['status']
+            instance.save()
+            # Update order status which may trigger status recalculation
+            instance.update_status()
+            return instance
+
+        # Handle other updates (full or partial)
+        # Update basic fields
+        for attr, value in validated_data.items():
+            setattr(instance, attr, value)
+        instance.save()
+
+        # Check if items are provided in the request (for editing orders)
+        items_data = self.initial_data.get('items')
+        if items_data is not None:  # Only update items if explicitly provided
+            # Clear existing items
+            instance.items.all().delete()
+
+            # Create new items
+            for item_data in items_data:
+                PurchaseOrderItem.objects.create(
+                    purchase_order=instance,
+                    product_id=item_data['product'],
+                    quantity=item_data['quantity'],
+                    unit_price=item_data['unit_price'],
+                    batch_number=item_data.get('batch_number', ''),
+                    expiry_date=item_data.get('expiry_date')
+                )
+
+            # Update total amount
+            instance.total_amount = sum(item.total_price for item in instance.items.all())
+            instance.save()
+
+        return instance

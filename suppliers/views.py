@@ -31,6 +31,12 @@ class PurchaseOrderViewSet(viewsets.ModelViewSet):
     search_fields = ['order_number', 'supplier__name']
     ordering_fields = ['order_date', 'expected_delivery_date']
     ordering = ['-order_date']
+    http_method_names = ['get', 'post', 'put', 'patch', 'delete']  # Explicitly allow PATCH
+
+    def partial_update(self, request, *args, **kwargs):
+        """Handle PATCH requests for partial updates"""
+        kwargs['partial'] = True
+        return super().partial_update(request, *args, **kwargs)
 
     @action(detail=True, methods=['post'])
     def receive_batch(self, request, pk=None):
@@ -64,6 +70,10 @@ class PurchaseOrderViewSet(viewsets.ModelViewSet):
 
         # Receive the batch (adds to stock)
         batch.receive_batch()
+
+        # Update the purchase order item's received quantity
+        item.received_quantity += quantity
+        item.save()
 
         return Response({'message': 'Batch received successfully', 'batch_id': batch.id})
 
