@@ -62,10 +62,12 @@ class PurchaseOrderSerializer(serializers.ModelSerializer):
     def update(self, instance, validated_data):
         # Handle status-only updates (like approving orders)
         if 'status' in validated_data and len(validated_data) == 1:
-            instance.status = validated_data['status']
+            new_status = validated_data['status']
+            instance.status = new_status
             instance.save()
-            # Update order status which may trigger status recalculation
-            instance.update_status()
+            # Only recalculate status if not manually setting to cancelled or pending
+            if new_status not in ['cancelled', 'pending']:
+                instance.update_status()
             return instance
 
         # Handle other updates (full or partial)
