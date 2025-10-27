@@ -417,11 +417,11 @@ class SaleViewSet(viewsets.ModelViewSet):
 
                     # Wholesale validation: Check minimum quantity if wholesale price is used
                     if sale_type == 'wholesale' and hasattr(product, 'wholesale_price') and product.wholesale_price and product.wholesale_price > 0:
-                        # Registered customers can buy any quantity >= 1, unregistered must meet wholesale_min_qty
-                        min_quantity = 1 if customer_id else product.wholesale_min_qty
+                        # Minimum quantity is always 1 for all sales (no wholesale minimum check)
+                        min_quantity = 1
                         if requested_quantity < min_quantity:
                             return Response(
-                                {'error': f'Product "{product.name}" requires minimum {min_quantity} units for wholesale pricing. Requested: {requested_quantity}'},
+                                {'error': f'Product "{product.name}" requires minimum {min_quantity} units. Requested: {requested_quantity}'},
                                 status=status.HTTP_400_BAD_REQUEST
                             )
 
@@ -432,11 +432,11 @@ class SaleViewSet(viewsets.ModelViewSet):
                     })
 
                 # Wholesale validation: Minimum total order quantity
-                # Registered customers can have orders with less than 10 items, unregistered must have minimum 10
-                min_total_quantity = 1 if customer_id else 10
+                # Minimum quantity is always 1 for all sales (no wholesale minimum check)
+                min_total_quantity = 1
                 if sale_type == 'wholesale' and total_quantity < min_total_quantity:
                     return Response(
-                        {'error': f'Wholesale orders require minimum {min_total_quantity} items total. Current total: {total_quantity}'},
+                        {'error': f'Orders require minimum {min_total_quantity} items total. Current total: {total_quantity}'},
                         status=status.HTTP_400_BAD_REQUEST
                     )
 
