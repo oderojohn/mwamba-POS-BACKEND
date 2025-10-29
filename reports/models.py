@@ -36,6 +36,7 @@ class SalesReport(models.Model):
     transaction_count = models.PositiveIntegerField(default=0)
     gross_profit = models.DecimalField(max_digits=12, decimal_places=2, default=0)
     net_profit = models.DecimalField(max_digits=12, decimal_places=2, default=0)
+    average_transaction = models.DecimalField(max_digits=10, decimal_places=2, default=0)
 
     class Meta:
         ordering = ['-date']
@@ -72,8 +73,11 @@ class CustomerAnalytics(models.Model):
 class InventoryAnalytics(models.Model):
     """Inventory analytics and insights"""
     product = models.ForeignKey('inventory.Product', on_delete=models.CASCADE)
+    date = models.DateField(null=True, blank=True)
     current_stock = models.PositiveIntegerField(default=0)
     stock_value = models.DecimalField(max_digits=12, decimal_places=2, default=0)
+    sold_today = models.PositiveIntegerField(default=0)
+    received_today = models.PositiveIntegerField(default=0)
     average_daily_sales = models.DecimalField(max_digits=10, decimal_places=2, default=0)
     days_of_stock_remaining = models.DecimalField(max_digits=10, decimal_places=2, default=0)
     turnover_rate = models.DecimalField(max_digits=5, decimal_places=2, default=0)
@@ -83,6 +87,10 @@ class InventoryAnalytics(models.Model):
         ('out_of_stock', 'Out of Stock'),
         ('overstock', 'Overstock')
     ], default='in_stock')
+
+    class Meta:
+        ordering = ['-date']
+        unique_together = ['product', 'date']
 
 class ShiftAnalytics(models.Model):
     """Shift performance analytics"""

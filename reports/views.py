@@ -51,7 +51,14 @@ class ReportViewSet(viewsets.ModelViewSet):
     @action(detail=False, methods=['post'])
     def generate_inventory_report(self, request):
         """Generate inventory report"""
-        inventory_data = self._get_inventory_data()
+        date = request.data.get('date')
+        if date:
+            try:
+                date = datetime.strptime(date, '%Y-%m-%d').date()
+            except ValueError:
+                return Response({'error': 'Invalid date format. Use YYYY-MM-DD'}, status=status.HTTP_400_BAD_REQUEST)
+
+        inventory_data = self._get_inventory_data(date)
 
         # Return the actual inventory data
         return Response(inventory_data, status=status.HTTP_200_OK)
@@ -92,26 +99,34 @@ class ReportViewSet(viewsets.ModelViewSet):
             transaction_count=Count('id')
         ).order_by('date')
 
-        # Get payment method breakdown
-        payments = Payment.objects.filter(
+        # Get payment method breakdown per day
+        payments_per_day = Payment.objects.filter(
             sale__sale_date__date__range=[date_from, date_to],
             status='completed'
-        ).values('payment_type').annotate(
+        ).annotate(
+            date=TruncDate('sale__sale_date')
+        ).values('date', 'payment_type').annotate(
             amount=Sum('amount')
-        )
+        ).order_by('date')
 
-        payment_breakdown = {}
-        for payment in payments:
-            payment_breakdown[payment['payment_type']] = float(payment['amount'])
+        # Group payments by date
+        payments_by_date = {}
+        for payment in payments_per_day:
+            date_key = payment['date'].strftime('%Y-%m-%d')
+            if date_key not in payments_by_date:
+                payments_by_date[date_key] = {}
+            payments_by_date[date_key][payment['payment_type']] = float(payment['amount'])
 
         result = []
         for sale in sales:
+            date_str = sale['date'].strftime('%Y-%m-%d')
+            day_payments = payments_by_date.get(date_str, {})
             result.append({
-                'date': sale['date'].strftime('%Y-%m-%d'),
+                'date': date_str,
                 'total_sales': float(sale['total_sales']),
-                'cash_sales': float(payment_breakdown.get('cash', 0)),
-                'card_sales': float(payment_breakdown.get('card', 0)),
-                'mobile_sales': float(payment_breakdown.get('mpesa', 0)),  # Frontend expects 'mobile_sales'
+                'cash_sales': float(day_payments.get('cash', 0)),
+                'card_sales': float(day_payments.get('card', 0)),
+                'mobile_sales': float(day_payments.get('mpesa', 0)),  # Frontend expects 'mobile_sales'
                 'transactions': sale['transaction_count'],  # Frontend expects 'transactions'
                 'gross_profit': float(sale['total_sales'] * Decimal('0.25')),  # Estimated 25% margin
                 'net_profit': float(sale['total_sales'] * Decimal('0.20'))  # Estimated 20% net profit
@@ -119,11 +134,95 @@ class ReportViewSet(viewsets.ModelViewSet):
 
         return result
 
-    def _get_inventory_data(self):
+    def _get_daily_sales_summary(self, date=None):
+        """Get comprehensive daily sales summary"""
+        from sales.models import Sale, SaleItem, Payment
+        from django.db.models import Sum, Count
+
+        if date is None:
+            date = timezone.now().date()
+
+        # Total sales for the day
+        total_sales = Sale.objects.filter(
+            sale_date__date=date
+        ).aggregate(
+            total_amount=Sum('final_amount'),
+            transaction_count=Count('id')
+        )
+
+        # Payment method breakdown
+        payments = Payment.objects.filter(
+            sale__sale_date__date=date,
+            status='completed'
+        ).values('payment_type').annotate(
+            amount=Sum('amount'),
+            count=Count('id')
+        )
+
+        payment_breakdown = {}
+        for payment in payments:
+            payment_breakdown[payment['payment_type']] = {
+                'amount': float(payment['amount']),
+                'count': payment['count']
+            }
+
+        # Top products sold today
+        top_products = SaleItem.objects.filter(
+            sale__sale_date__date=date
+        ).values(
+            'product__name',
+            'product__sku'
+        ).annotate(
+            quantity_sold=Sum('quantity'),
+            revenue=Sum(F('unit_price') * F('quantity'))
+        ).order_by('-quantity_sold')[:10]
+
+        # Hourly sales breakdown
+        hourly_sales = Sale.objects.filter(
+            sale_date__date=date
+        ).annotate(
+            hour=ExtractHour('sale_date')
+        ).values('hour').annotate(
+            amount=Sum('final_amount'),
+            count=Count('id')
+        ).order_by('hour')
+
+        return {
+            'date': date.strftime('%Y-%m-%d'),
+            'total_sales': float(total_sales['total_amount'] or 0),
+            'total_transactions': total_sales['transaction_count'] or 0,
+            'average_transaction': float(total_sales['total_amount'] or 0) / max(total_sales['transaction_count'] or 1, 1),
+            'payment_methods': payment_breakdown,
+            'top_products': [
+                {
+                    'name': item['product__name'],
+                    'sku': item['product__sku'],
+                    'quantity_sold': item['quantity_sold'],
+                    'revenue': float(item['revenue'])
+                }
+                for item in top_products
+            ],
+            'hourly_breakdown': [
+                {
+                    'hour': item['hour'],
+                    'amount': float(item['amount']),
+                    'transactions': item['count']
+                }
+                for item in hourly_sales
+            ]
+        }
+
+    def _get_inventory_data(self, date=None):
         """Get current inventory data"""
-        from inventory.models import Product
+        from inventory.models import Product, StockMovement
+        from sales.models import SaleItem
+        from django.db.models import Sum
 
         products = Product.objects.all().select_related('category')
+
+        # Default to today if no date provided
+        if date is None:
+            date = timezone.now().date()
 
         result = []
         for product in products:
@@ -137,11 +236,25 @@ class ReportViewSet(viewsets.ModelViewSet):
             else:
                 status = 'in_stock'
 
+            # Calculate stock sold today
+            sold_today = SaleItem.objects.filter(
+                product=product,
+                sale__sale_date__date=date
+            ).aggregate(total=Sum('quantity'))['total'] or 0
+
+            # Calculate stock received today
+            received_today = StockMovement.objects.filter(
+                product=product,
+                movement_type='in',
+                created_at__date=date
+            ).aggregate(total=Sum('quantity'))['total'] or 0
+
             result.append({
                 'product': product.name,
                 'category': product.category.name if product.category else 'Uncategorized',
                 'stock_level': product.stock_quantity,
-                'sold_today': 0,  # Would be calculated from actual sales data
+                'sold_today': sold_today,
+                'received_today': received_today,
                 'value': float(product.stock_quantity * product.cost_price),
             })
 
@@ -213,6 +326,33 @@ class SalesSummaryView(generics.GenericAPIView):
     """Get sales summary for dashboard and reports"""
 
     def get(self, request):
+        # Check if products sold today is requested
+        if request.query_params.get('products_today'):
+            date = request.query_params.get('date')
+            if date:
+                try:
+                    date = datetime.strptime(date, '%Y-%m-%d').date()
+                except ValueError:
+                    return Response({'error': 'Invalid date format. Use YYYY-MM-DD'}, status=status.HTTP_400_BAD_REQUEST)
+            products_sold = self._get_products_sold_today(date)
+            return Response(products_sold)
+
+        # Check if today's summary is requested
+        if request.query_params.get('today_summary'):
+            today_summary = self._get_today_summary()
+            return Response(today_summary)
+
+        # Check if daily sales summary is requested
+        if request.query_params.get('daily_summary'):
+            date = request.query_params.get('date')
+            if date:
+                try:
+                    date = datetime.strptime(date, '%Y-%m-%d').date()
+                except ValueError:
+                    return Response({'error': 'Invalid date format. Use YYYY-MM-DD'}, status=status.HTTP_400_BAD_REQUEST)
+            daily_summary = self._get_daily_sales_summary(date)
+            return Response(daily_summary)
+
         # Check if shift_id is provided (for shift-specific sales summary)
         shift_id = request.query_params.get('shift_id')
 
@@ -266,8 +406,9 @@ class SalesSummaryView(generics.GenericAPIView):
 
     def _get_today_sales(self):
         from sales.models import Sale
+        today = timezone.now().date()
         today_sales = Sale.objects.filter(
-            sale_date__date=timezone.now().date()
+            sale_date__date=today
         ).aggregate(total=Sum('final_amount'))['total'] or Decimal('0')
         return float(today_sales)
 
@@ -342,6 +483,84 @@ class SalesSummaryView(generics.GenericAPIView):
             for item in top_products
         ]
 
+    def _get_products_sold_today(self, date=None):
+        """Get products sold on a specific date"""
+        from sales.models import SaleItem
+        from django.db.models import Sum
+
+        if date is None:
+            date = timezone.now().date()
+
+        products_sold = SaleItem.objects.filter(
+            sale__sale_date__date=date
+        ).values(
+            'product__name',
+            'product__sku'
+        ).annotate(
+            quantity_sold=Sum('quantity'),
+            revenue=Sum(F('unit_price') * F('quantity'))
+        ).order_by('-quantity_sold')
+
+        return [
+            {
+                'product_name': item['product__name'],
+                'sku': item['product__sku'],
+                'quantity_sold': item['quantity_sold'],
+                'revenue': float(item['revenue'])
+            }
+            for item in products_sold
+        ]
+
+    def _get_today_summary(self):
+        """Get comprehensive today's business summary"""
+        today = timezone.now().date()
+
+        # Today's sales summary
+        today_sales = self._get_today_sales()
+
+        # Today's transactions count
+        from sales.models import Sale
+        today_transactions = Sale.objects.filter(
+            sale_date__date=today
+        ).count()
+
+        # Today's profit (estimated)
+        today_profit = float(today_sales) * 0.20  # 20% estimated profit margin
+
+        # Products sold today
+        products_today = self._get_products_sold_today(today)
+
+        # Inventory alerts
+        from inventory.models import Product
+        low_stock_count = Product.objects.filter(stock_quantity__lte=10).count()
+        out_of_stock_count = Product.objects.filter(stock_quantity=0).count()
+
+        # Today's stock movements
+        from inventory.models import StockMovement
+        stock_received_today = StockMovement.objects.filter(
+            created_at__date=today,
+            movement_type='in'
+        ).aggregate(total=Sum('quantity'))['total'] or 0
+
+        stock_sold_today = sum(product['quantity_sold'] for product in products_today)
+
+        return {
+            'date': today.strftime('%Y-%m-%d'),
+            'sales_today': float(today_sales),
+            'transactions_today': today_transactions,
+            'profit_today': float(today_profit),
+            'products_sold_today': len(products_today),
+            'top_products_today': products_today[:5],  # Top 5 products
+            'inventory_alerts': {
+                'low_stock': low_stock_count,
+                'out_of_stock': out_of_stock_count
+            },
+            'stock_movements': {
+                'received_today': stock_received_today,
+                'sold_today': stock_sold_today
+            }
+        }
+
     def _get_recent_transactions(self):
         from sales.models import Sale
 
@@ -371,26 +590,34 @@ class SalesSummaryView(generics.GenericAPIView):
             transaction_count=Count('id')
         ).order_by('date')
 
-        # Get payment method breakdown for the entire range
-        payments = Payment.objects.filter(
+        # Get payment method breakdown per day
+        payments_per_day = Payment.objects.filter(
             sale__sale_date__date__range=[date_from, date_to],
             status='completed'
-        ).values('payment_type').annotate(
+        ).annotate(
+            date=TruncDate('sale__sale_date')
+        ).values('date', 'payment_type').annotate(
             amount=Sum('amount')
-        )
+        ).order_by('date')
 
-        payment_breakdown = {}
-        for payment in payments:
-            payment_breakdown[payment['payment_type']] = float(payment['amount'])
+        # Group payments by date
+        payments_by_date = {}
+        for payment in payments_per_day:
+            date_key = payment['date'].strftime('%Y-%m-%d')
+            if date_key not in payments_by_date:
+                payments_by_date[date_key] = {}
+            payments_by_date[date_key][payment['payment_type']] = float(payment['amount'])
 
         result = []
         for sale in sales:
+            date_str = sale['date'].strftime('%Y-%m-%d')
+            day_payments = payments_by_date.get(date_str, {})
             result.append({
-                'date': sale['date'].strftime('%Y-%m-%d'),
+                'date': date_str,
                 'total_sales': float(sale['total_sales']),
-                'cash_sales': float(payment_breakdown.get('cash', 0)),
-                'card_sales': float(payment_breakdown.get('card', 0)),
-                'mobile_sales': float(payment_breakdown.get('mpesa', 0)),
+                'cash_sales': float(day_payments.get('cash', 0)),
+                'card_sales': float(day_payments.get('card', 0)),
+                'mobile_sales': float(day_payments.get('mpesa', 0)),
                 'transactions': sale['transaction_count'],
                 'gross_profit': float(sale['total_sales'] * Decimal('0.25')),
                 'net_profit': float(sale['total_sales'] * Decimal('0.20'))
@@ -458,7 +685,13 @@ class InventorySummaryView(generics.GenericAPIView):
         # Check if detailed report data is requested
         if request.query_params.get('report') == 'detailed':
             # Return detailed inventory report data
-            inventory_data = self._get_inventory_report_data()
+            date = request.query_params.get('date')
+            if date:
+                try:
+                    date = datetime.strptime(date, '%Y-%m-%d').date()
+                except ValueError:
+                    return Response({'error': 'Invalid date format. Use YYYY-MM-DD'}, status=status.HTTP_400_BAD_REQUEST)
+            inventory_data = self._get_inventory_report_data(date)
             return Response(inventory_data)
         else:
             # Return dashboard summary data
@@ -528,19 +761,39 @@ class InventorySummaryView(generics.GenericAPIView):
             serializer = InventorySummarySerializer(data)
             return Response(serializer.data)
 
-    def _get_inventory_report_data(self):
+    def _get_inventory_report_data(self, date=None):
         """Get detailed inventory data for reports"""
-        from inventory.models import Product
+        from inventory.models import Product, StockMovement
+        from sales.models import SaleItem
+        from django.db.models import Sum
 
         products = Product.objects.all().select_related('category')
 
+        # Default to today if no date provided
+        if date is None:
+            date = timezone.now().date()
+
         result = []
         for product in products:
+            # Calculate stock sold today
+            sold_today = SaleItem.objects.filter(
+                product=product,
+                sale__sale_date__date=date
+            ).aggregate(total=Sum('quantity'))['total'] or 0
+
+            # Calculate stock received today
+            received_today = StockMovement.objects.filter(
+                product=product,
+                movement_type='in',
+                created_at__date=date
+            ).aggregate(total=Sum('quantity'))['total'] or 0
+
             result.append({
                 'product': product.name,
                 'category': product.category.name if product.category else 'Uncategorized',
                 'stock_level': product.stock_quantity,
-                'sold_today': 0,  # Would be calculated from actual sales data
+                'sold_today': sold_today,
+                'received_today': received_today,
                 'value': float(product.stock_quantity * product.selling_price),
             })
 
