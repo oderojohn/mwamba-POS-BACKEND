@@ -91,7 +91,8 @@ class ReportViewSet(viewsets.ModelViewSet):
         from django.db.models import Case, When, DecimalField
 
         sales = Sale.objects.filter(
-            sale_date__date__range=[date_from, date_to]
+            sale_date__date__range=[date_from, date_to],
+            voided=False
         ).annotate(
             date=TruncDate('sale_date')
         ).values('date').annotate(
@@ -102,6 +103,7 @@ class ReportViewSet(viewsets.ModelViewSet):
         # Get payment method breakdown per day
         payments_per_day = Payment.objects.filter(
             sale__sale_date__date__range=[date_from, date_to],
+            sale__voided=False,
             status='completed'
         ).annotate(
             date=TruncDate('sale__sale_date')
@@ -291,9 +293,10 @@ class ReportViewSet(viewsets.ModelViewSet):
         from sales.models import SaleItem
         from django.db.models import Sum
 
-        # Calculate total revenue and cost of goods sold from SaleItem data
+        # Calculate total revenue and cost of goods sold from SaleItem data (exclude voided sales)
         sales_data = SaleItem.objects.filter(
-            sale__sale_date__date__range=[date_from, date_to]
+            sale__sale_date__date__range=[date_from, date_to],
+            sale__voided=False
         ).aggregate(
             total_revenue=Sum(F('unit_price') * F('quantity')),
             total_cost=Sum(F('product__cost_price') * F('quantity'))
@@ -325,6 +328,29 @@ class SalesSummaryView(generics.GenericAPIView):
     """Get sales summary for dashboard and reports"""
 
     def get(self, request):
+        # Check if detailed transactions are requested
+        if request.query_params.get('detailed_transactions'):
+            date_from = request.query_params.get('date_from')
+            date_to = request.query_params.get('date_to')
+            shift_id = request.query_params.get('shift_id')
+
+            if shift_id:
+                detailed_transactions = self._get_detailed_transactions_for_shift(shift_id)
+            elif date_from and date_to:
+                detailed_transactions = self._get_detailed_transactions_for_range(date_from, date_to)
+            else:
+                # Default to today
+                today = timezone.now().date()
+                detailed_transactions = self._get_detailed_transactions_for_date(today)
+
+            return Response(detailed_transactions)
+
+        # Check if chit details for a specific sale are requested
+        sale_id = request.query_params.get('sale_id')
+        if sale_id:
+            chit_details = self._get_sale_chit_details(sale_id)
+            return Response(chit_details)
+
         # Check if products sold today is requested
         if request.query_params.get('products_today'):
             date = request.query_params.get('date')
@@ -597,7 +623,8 @@ class SalesSummaryView(generics.GenericAPIView):
         from payments.models import Payment
 
         sales = Sale.objects.filter(
-            sale_date__date__range=[date_from, date_to]
+            sale_date__date__range=[date_from, date_to],
+            voided=False
         ).annotate(
             date=TruncDate('sale_date')
         ).values('date').annotate(
@@ -608,6 +635,7 @@ class SalesSummaryView(generics.GenericAPIView):
         # Get payment method breakdown per day
         payments_per_day = Payment.objects.filter(
             sale__sale_date__date__range=[date_from, date_to],
+            sale__voided=False,
             status='completed'
         ).annotate(
             date=TruncDate('sale__sale_date')
@@ -629,7 +657,8 @@ class SalesSummaryView(generics.GenericAPIView):
             day_payments = payments_by_date.get(date_str, {})
             # Calculate actual gross profit for the day
             sales_items_for_day = SaleItem.objects.filter(
-                sale__sale_date__date=sale['date']
+                sale__sale_date__date=sale['date'],
+                sale__voided=False
             ).select_related('product')
 
             day_gross_profit = 0
@@ -662,8 +691,11 @@ class SalesSummaryView(generics.GenericAPIView):
         from sales.models import Sale
         from payments.models import Payment
 
-        # Get sales for the shift
-        sales = Sale.objects.filter(shift_id=shift_id).annotate(
+        # Get sales for the shift (exclude voided sales)
+        sales = Sale.objects.filter(
+            shift_id=shift_id,
+            voided=False
+        ).annotate(
             date=TruncDate('sale_date')
         ).values('date').annotate(
             total_sales=Sum('total_amount'),
@@ -673,6 +705,7 @@ class SalesSummaryView(generics.GenericAPIView):
         # Get payment method breakdown for the shift
         payments = Payment.objects.filter(
             sale__shift_id=shift_id,
+            sale__voided=False,
             status='completed'
         ).values('payment_type').annotate(
             amount=Sum('amount')
@@ -690,7 +723,8 @@ class SalesSummaryView(generics.GenericAPIView):
         # Gross profit = sum((selling_price - cost_price) * quantity) for all items sold in shift
         from sales.models import SaleItem
         sales_items = SaleItem.objects.filter(
-            sale__shift_id=shift_id
+            sale__shift_id=shift_id,
+            sale__voided=False
         ).select_related('product')
 
         gross_profit = 0
@@ -709,8 +743,11 @@ class SalesSummaryView(generics.GenericAPIView):
         # Net profit (estimated as gross profit minus 5% operating costs)
         net_profit = gross_profit * 0.95
 
-        # Get all sales for the shift with payment info
-        all_sales = Sale.objects.filter(shift_id=shift_id).select_related('customer').prefetch_related('payment_set').order_by('-sale_date')
+        # Get all sales for the shift with payment info (exclude voided)
+        all_sales = Sale.objects.filter(
+            shift_id=shift_id,
+            voided=False
+        ).select_related('customer').prefetch_related('payment_set').order_by('-sale_date')
 
         result = {
             'total_sales': total_sales,
@@ -742,9 +779,10 @@ class SalesSummaryView(generics.GenericAPIView):
         from payments.models import Payment
         from inventory.models import SalesHistory
 
-        # Get all sales for today
+        # Get all sales for today (exclude voided sales)
         sales = Sale.objects.filter(
-            sale_date__date=date
+            sale_date__date=date,
+            voided=False
         ).annotate(
             date=TruncDate('sale_date')
         ).values('date').annotate(
@@ -755,6 +793,7 @@ class SalesSummaryView(generics.GenericAPIView):
         # Get payment method breakdown for today
         payments = Payment.objects.filter(
             sale__sale_date__date=date,
+            sale__voided=False,
             status='completed'
         ).values('payment_type').annotate(
             amount=Sum('amount')
@@ -771,7 +810,8 @@ class SalesSummaryView(generics.GenericAPIView):
         # Calculate actual gross profit for today
         # Gross profit = sum((selling_price - cost_price) * quantity) for all items sold today
         sales_items = SaleItem.objects.filter(
-            sale__sale_date__date=date
+            sale__sale_date__date=date,
+            sale__voided=False
         ).select_related('product')
 
         gross_profit = 0
@@ -790,8 +830,11 @@ class SalesSummaryView(generics.GenericAPIView):
         # Net profit (estimated as gross profit minus 5% operating costs)
         net_profit = gross_profit * 0.95
 
-        # Get all sales for today with payment info
-        all_sales = Sale.objects.filter(sale_date__date=date).select_related('customer').prefetch_related('payment_set').order_by('-sale_date')
+        # Get all sales for today with payment info (exclude voided)
+        all_sales = Sale.objects.filter(
+            sale_date__date=date,
+            voided=False
+        ).select_related('customer').prefetch_related('payment_set').order_by('-sale_date')
 
         result = {
             'total_sales': total_sales,
@@ -823,9 +866,10 @@ class SalesSummaryView(generics.GenericAPIView):
         from django.db.models import Sum, Case, When, DecimalField
 
         # Get all products sold in the date range with their performance metrics
-        # Separate retail and wholesale sales
+        # Separate retail and wholesale sales (exclude voided sales)
         product_performance = SaleItem.objects.filter(
-            sale__sale_date__date__range=[date_from, date_to]
+            sale__sale_date__date__range=[date_from, date_to],
+            sale__voided=False
         ).select_related('product', 'sale').values(
             'product__name',
             'product__sku',
@@ -1169,6 +1213,174 @@ class ShiftSummaryView(generics.GenericAPIView):
 
             active_shifts = Shift.objects.filter(status='open').count()
 
+    def _get_detailed_transactions_for_date(self, date):
+        """Get detailed transactions and items sold for a specific date"""
+        from sales.models import Sale, SaleItem
+        from payments.models import Payment
+
+        # Get all non-voided sales for the date
+        sales = Sale.objects.filter(
+            sale_date__date=date,
+            voided=False
+        ).select_related('customer').prefetch_related('saleitem_set', 'payment_set').order_by('-sale_date')
+
+        result = []
+        for sale in sales:
+            # Get payment info
+            payments = sale.payment_set.filter(status='completed')
+            payment_info = []
+            for payment in payments:
+                payment_info.append({
+                    'payment_type': payment.payment_type,
+                    'amount': float(payment.amount),
+                    'reference_number': payment.reference_number,
+                    'created_at': payment.created_at.isoformat()
+                })
+
+            # Get sale items
+            items = []
+            for item in sale.saleitem_set.all():
+                items.append({
+                    'product_name': item.product.name,
+                    'product_sku': item.product.sku,
+                    'quantity': item.quantity,
+                    'unit_price': float(item.unit_price),
+                    'discount': float(item.discount),
+                    'total_price': float(item.unit_price * item.quantity - item.discount)
+                })
+
+            result.append({
+                'transaction_id': sale.id,
+                'receipt_number': sale.receipt_number,
+                'sale_date': sale.sale_date.isoformat(),
+                'customer': sale.customer.name if sale.customer else 'Walk-in',
+                'sale_type': sale.sale_type,
+                'total_amount': float(sale.final_amount),
+                'tax_amount': float(sale.tax_amount),
+                'discount_amount': float(sale.discount_amount),
+                'final_amount': float(sale.final_amount),
+                'payments': payment_info,
+                'items': items
+            })
+
+        return result
+
+    def _get_detailed_transactions_for_range(self, date_from, date_to):
+        """Get detailed transactions and items sold for a date range"""
+        from sales.models import Sale, SaleItem
+        from payments.models import Payment
+
+        # Get all non-voided sales for the date range
+        sales = Sale.objects.filter(
+            sale_date__date__range=[date_from, date_to],
+            voided=False
+        ).select_related('customer').prefetch_related('saleitem_set', 'payment_set').order_by('-sale_date')
+
+        result = []
+        for sale in sales:
+            # Get payment info
+            payments = sale.payment_set.filter(status='completed')
+            payment_info = []
+            for payment in payments:
+                payment_info.append({
+                    'payment_type': payment.payment_type,
+                    'amount': float(payment.amount),
+                    'reference_number': payment.reference_number,
+                    'created_at': payment.created_at.isoformat()
+                })
+
+            # Get sale items
+            items = []
+            for item in sale.saleitem_set.all():
+                items.append({
+                    'product_name': item.product.name,
+                    'product_sku': item.product.sku,
+                    'quantity': item.quantity,
+                    'unit_price': float(item.unit_price),
+                    'discount': float(item.discount),
+                    'total_price': float(item.unit_price * item.quantity - item.discount)
+                })
+
+            result.append({
+                'transaction_id': sale.id,
+                'receipt_number': sale.receipt_number,
+                'sale_date': sale.sale_date.isoformat(),
+                'customer': sale.customer.name if sale.customer else 'Walk-in',
+                'sale_type': sale.sale_type,
+                'total_amount': float(sale.final_amount),
+                'tax_amount': float(sale.tax_amount),
+                'discount_amount': float(sale.discount_amount),
+                'final_amount': float(sale.final_amount),
+                'payments': payment_info,
+                'items': items
+            })
+
+        return result
+
+    def _get_detailed_transactions_for_shift(self, shift_id):
+        """Get detailed transactions and items sold for a specific shift"""
+        from sales.models import Sale, SaleItem
+        from payments.models import Payment
+
+        # Get all non-voided sales for the shift
+        sales = Sale.objects.filter(
+            shift_id=shift_id,
+            voided=False
+        ).select_related('customer').prefetch_related('saleitem_set', 'payment_set').order_by('-sale_date')
+
+        result = []
+        for sale in sales:
+            # Get payment info
+            payments = sale.payment_set.filter(status='completed')
+            payment_info = []
+            for payment in payments:
+                payment_info.append({
+                    'payment_type': payment.payment_type,
+                    'amount': float(payment.amount),
+                    'reference_number': payment.reference_number,
+                    'created_at': payment.created_at.isoformat()
+                })
+
+            # Get sale items
+            items = []
+            for item in sale.saleitem_set.all():
+                items.append({
+                    'product_name': item.product.name,
+                    'product_sku': item.product.sku,
+                    'quantity': item.quantity,
+                    'unit_price': float(item.unit_price),
+                    'discount': float(item.discount),
+                    'total_price': float(item.unit_price * item.quantity - item.discount)
+                })
+
+            result.append({
+                'transaction_id': sale.id,
+                'receipt_number': sale.receipt_number,
+                'sale_date': sale.sale_date.isoformat(),
+                'customer': sale.customer.name if sale.customer else 'Walk-in',
+                'sale_type': sale.sale_type,
+                'total_amount': float(sale.final_amount),
+                'tax_amount': float(sale.tax_amount),
+                'discount_amount': float(sale.discount_amount),
+                'final_amount': float(sale.final_amount),
+                'payments': payment_info,
+                'items': items
+            })
+
+        return result
+
+    def get(self, request):
+        # Check if detailed report data is requested
+        if request.query_params.get('report') == 'detailed':
+            # Return detailed shift report data
+            shift_data = self._get_shift_report_data()
+            return Response(shift_data)
+        else:
+            # Return dashboard summary data
+            from shifts.models import Shift
+
+            active_shifts = Shift.objects.filter(status='open').count()
+
             completed_shifts_today = Shift.objects.filter(
                 end_time__date=timezone.now().date(),
                 status='closed'
@@ -1188,6 +1400,96 @@ class ShiftSummaryView(generics.GenericAPIView):
             serializer = ShiftSummarySerializer(data)
             return Response(serializer.data)
 
+        return result
+
+    def _get_sale_chit_details(self, sale_id):
+        """Get detailed chit information for a specific sale"""
+        from sales.models import Sale, SaleItem
+        from payments.models import Payment
+
+        try:
+            # Get the sale with related data
+            sale = Sale.objects.select_related('customer', 'shift__cashier__user').prefetch_related(
+                'saleitem_set__product', 'payment_set'
+            ).get(id=sale_id, voided=False)
+
+            # Get sale items with product details
+            items = []
+            for item in sale.saleitem_set.all():
+                items.append({
+                    'id': item.id,
+                    'product_name': item.product.name,
+                    'product_sku': item.product.sku,
+                    'category': item.product.category.name if item.product.category else 'Uncategorized',
+                    'quantity': item.quantity,
+                    'unit_price': float(item.unit_price),
+                    'discount': float(item.discount),
+                    'line_total': float((item.unit_price * item.quantity) - item.discount),
+                    'cost_price': float(item.product.cost_price) if item.product.cost_price else 0,
+                    'profit': float(((item.unit_price - item.product.cost_price) * item.quantity) - item.discount) if item.product.cost_price else 0
+                })
+
+            # Get payment details
+            payments = []
+            for payment in sale.payment_set.filter(status='completed'):
+                payments.append({
+                    'id': payment.id,
+                    'payment_type': payment.payment_type,
+                    'amount': float(payment.amount),
+                    'reference_number': payment.reference_number,
+                    'created_at': payment.created_at.isoformat(),
+                    'status': payment.status
+                })
+
+            # Calculate totals
+            subtotal = sum(item['line_total'] for item in items)
+            total_discount = sum(item['discount'] * item['quantity'] for item in items)
+            total_cost = sum(item['cost_price'] * item['quantity'] for item in items)
+            total_profit = sum(item['profit'] for item in items)
+
+            chit_data = {
+                'sale_id': sale.id,
+                'receipt_number': sale.receipt_number,
+                'sale_date': sale.sale_date.isoformat(),
+                'sale_type': sale.sale_type,
+                'customer': {
+                    'id': sale.customer.id if sale.customer else None,
+                    'name': sale.customer.name if sale.customer else 'Walk-in',
+                    'phone': sale.customer.phone if sale.customer else None
+                },
+                'cashier': {
+                    'id': sale.shift.cashier.id if sale.shift and sale.shift.cashier else None,
+                    'name': sale.shift.cashier.user.get_full_name() if sale.shift and sale.shift.cashier else 'Unknown',
+                    'username': sale.shift.cashier.user.username if sale.shift and sale.shift.cashier else 'Unknown'
+                } if sale.shift else None,
+                'shift': {
+                    'id': sale.shift.id if sale.shift else None,
+                    'start_time': sale.shift.start_time.isoformat() if sale.shift else None,
+                    'status': sale.shift.status if sale.shift else None
+                } if sale.shift else None,
+                'items': items,
+                'payments': payments,
+                'summary': {
+                    'item_count': len(items),
+                    'total_quantity': sum(item['quantity'] for item in items),
+                    'subtotal': subtotal,
+                    'tax_amount': float(sale.tax_amount),
+                    'discount_amount': float(sale.discount_amount),
+                    'final_amount': float(sale.final_amount),
+                    'total_cost': total_cost,
+                    'total_profit': total_profit,
+                    'profit_margin': (total_profit / subtotal * 100) if subtotal > 0 else 0
+                },
+                'status': 'completed',
+                'voided': sale.voided
+            }
+
+            return chit_data
+
+        except Sale.DoesNotExist:
+            return {'error': 'Sale not found or has been voided'}
+        except Exception as e:
+            return {'error': f'Error retrieving chit details: {str(e)}'}
     def _get_shift_report_data(self):
         """Get detailed shift data for reports"""
         from shifts.models import Shift

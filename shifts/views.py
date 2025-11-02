@@ -1,12 +1,19 @@
 from rest_framework import viewsets, generics, status
 from rest_framework.response import Response
 from django.utils import timezone
+from django_filters.rest_framework import DjangoFilterBackend
+from rest_framework.filters import SearchFilter, OrderingFilter
 from .models import Shift
 from .serializers import ShiftSerializer
 
 class ShiftViewSet(viewsets.ModelViewSet):
     queryset = Shift.objects.all()
     serializer_class = ShiftSerializer
+    filter_backends = [DjangoFilterBackend, SearchFilter, OrderingFilter]
+    filterset_fields = ['cashier', 'status', 'start_time', 'end_time']
+    search_fields = ['cashier__user__username', 'cashier__user__first_name', 'cashier__user__last_name']
+    ordering_fields = ['start_time', 'end_time', 'total_sales', 'transaction_count']
+    ordering = ['-start_time']
 
 class StartShiftView(generics.CreateAPIView):
     serializer_class = ShiftSerializer
@@ -144,11 +151,13 @@ class CurrentShiftView(generics.GenericAPIView):
 
     def get(self, request, *args, **kwargs):
         from users.models import UserProfile
-        try:
-            user_profile = request.user.userprofile
-        except UserProfile.DoesNotExist:
-            print(f"CurrentShiftView: UserProfile not found for user {request.user}")
-            return Response({'detail': 'User profile not found'}, status=status.HTTP_404_NOT_FOUND)
+        # Get or create user profile for authenticated user
+        user_profile, created = UserProfile.objects.get_or_create(
+            user=request.user,
+            defaults={'role': 'cashier'}
+        )
+        if created:
+            print(f"CurrentShiftView: Created UserProfile for user {request.user}")
 
         try:
             shift = Shift.objects.get(cashier=user_profile, status='open')
@@ -166,3 +175,26 @@ class CurrentShiftView(generics.GenericAPIView):
             import traceback
             traceback.print_exc()
             return Response({'error': f'Error retrieving shift data: {str(e)}'}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+
+
+class AllShiftsView(generics.ListAPIView):
+    serializer_class = ShiftSerializer
+    filter_backends = [DjangoFilterBackend, SearchFilter, OrderingFilter]
+    filterset_fields = ['cashier', 'status', 'start_time', 'end_time']
+    search_fields = ['cashier__user__username', 'cashier__user__first_name', 'cashier__user__last_name']
+    ordering_fields = ['start_time', 'end_time', 'total_sales', 'transaction_count']
+    ordering = ['-start_time']
+
+    def get_queryset(self):
+        queryset = Shift.objects.all()
+
+        # Filter by date range if provided
+        start_date = self.request.query_params.get('start_date')
+        end_date = self.request.query_params.get('end_date')
+
+        if start_date:
+            queryset = queryset.filter(start_time__date__gte=start_date)
+        if end_date:
+            queryset = queryset.filter(start_time__date__lte=end_date)
+
+        return queryset

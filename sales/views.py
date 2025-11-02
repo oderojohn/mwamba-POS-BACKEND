@@ -326,6 +326,112 @@ class SaleViewSet(viewsets.ModelViewSet):
             'void_reason': void_reason
         }, status=status.HTTP_200_OK)
 
+    @action(detail=True, methods=['post'])
+    def void_sale(self, request, pk=None):
+        """Void a completed sale with a reason"""
+        try:
+            sale = Sale.objects.get(id=pk)
+        except Sale.DoesNotExist:
+            return Response(
+                {'error': 'Sale not found'},
+                status=status.HTTP_404_NOT_FOUND
+            )
+
+        # Check if sale is already voided
+        if sale.voided:
+            return Response(
+                {'error': 'Sale is already voided'},
+                status=status.HTTP_400_BAD_REQUEST
+            )
+
+        void_reason = request.data.get('reason', '').strip()
+        if not void_reason:
+            return Response(
+                {'error': 'Void reason is required'},
+                status=status.HTTP_400_BAD_REQUEST
+            )
+
+        try:
+            with transaction.atomic():
+                # Mark sale as voided
+                sale.voided = True
+                sale.void_reason = void_reason
+                sale.voided_at = timezone.now()
+                sale.voided_by = request.user.userprofile if hasattr(request.user, 'userprofile') else None
+                sale.save()
+
+                # Restore stock quantities
+                for sale_item in sale.saleitem_set.all():
+                    product = sale_item.product
+                    quantity_to_restore = sale_item.quantity
+
+                    # Restore product stock
+                    from decimal import Decimal
+                    product.stock_quantity = Decimal(str(product.stock_quantity)) + Decimal(str(quantity_to_restore))
+                    product.save(update_fields=['stock_quantity'])
+
+                    # Create stock movement record
+                    from inventory.models import StockMovement
+                    StockMovement.objects.create(
+                        product=product,
+                        movement_type='in',
+                        quantity=quantity_to_restore,
+                        reason=f'Sale void {sale.receipt_number} - {void_reason}',
+                        user=request.user.userprofile if hasattr(request.user, 'userprofile') else None
+                    )
+
+                    # Update batch quantities if applicable
+                    from inventory.models import Batch, SalesHistory
+                    sales_history_records = SalesHistory.objects.filter(
+                        product=product,
+                        receipt_number=sale.receipt_number
+                    )
+
+                    for history_record in sales_history_records:
+                        if history_record.batch:
+                            batch = history_record.batch
+                            batch.quantity = Decimal(str(batch.quantity)) + Decimal(str(history_record.quantity))
+                            batch.save(update_fields=['quantity'])
+
+                # Update shift totals (subtract the voided sale)
+                if sale.shift:
+                    from decimal import Decimal
+                    void_amount = Decimal(str(sale.final_amount))
+
+                    # Get payment method from payment record
+                    payment = sale.payment_set.first()
+                    payment_method = payment.payment_type if payment else 'cash'
+
+                    # Subtract from shift totals based on payment method
+                    if payment_method == 'cash':
+                        sale.shift.cash_sales = F('cash_sales') - void_amount
+                        sale.shift.save(update_fields=['cash_sales'])
+                    elif payment_method == 'card':
+                        sale.shift.card_sales = F('card_sales') - void_amount
+                        sale.shift.save(update_fields=['card_sales'])
+                    elif payment_method in ['mpesa', 'mobile']:
+                        sale.shift.mobile_sales = F('mobile_sales') - void_amount
+                        sale.shift.save(update_fields=['mobile_sales'])
+
+                    # Subtract from total sales
+                    sale.shift.total_sales = F('total_sales') - void_amount
+                    sale.shift.save(update_fields=['total_sales'])
+
+                return Response({
+                    'message': 'Sale voided successfully',
+                    'void_reason': void_reason,
+                    'sale_id': sale.id
+                }, status=status.HTTP_200_OK)
+
+        except Exception as e:
+            print(f"Error voiding sale: {str(e)}")
+            import traceback
+            traceback.print_exc()
+            return Response({
+                'error': 'Failed to void sale',
+                'details': str(e)
+            }, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+
     def create(self, request, *args, **kwargs):
         """
         Custom create method to handle sale creation from frontend cart data

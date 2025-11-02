@@ -28,10 +28,24 @@ class SaleItemSerializer(serializers.ModelSerializer):
 
 class SaleSerializer(serializers.ModelSerializer):
     items = SaleItemSerializer(many=True, read_only=True)
+    customer_name = serializers.SerializerMethodField()
+    payment_method = serializers.SerializerMethodField()
+    voided_by_name = serializers.SerializerMethodField()
 
     class Meta:
         model = Sale
         fields = '__all__'
+
+    def get_customer_name(self, obj):
+        return obj.customer.name if obj.customer else None
+
+    def get_payment_method(self, obj):
+        # Get payment method from related payment record
+        payment = obj.payment_set.first()
+        return payment.payment_type if payment else None
+
+    def get_voided_by_name(self, obj):
+        return obj.voided_by.user.username if obj.voided_by else None
 
 class ReturnSerializer(serializers.ModelSerializer):
     sale_receipt = serializers.CharField(source='sale.receipt_number', read_only=True)

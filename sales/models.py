@@ -46,6 +46,12 @@ class Sale(models.Model):
     final_amount = models.DecimalField(max_digits=10, decimal_places=2)
     sale_date = models.DateTimeField(auto_now_add=True)
     receipt_number = models.CharField(max_length=50, unique=True)
+
+    # Void functionality
+    voided = models.BooleanField(default=False)
+    void_reason = models.TextField(blank=True, null=True)
+    voided_at = models.DateTimeField(null=True, blank=True)
+    voided_by = models.ForeignKey('users.UserProfile', on_delete=models.SET_NULL, null=True, blank=True, related_name='voided_sales')
     
     def __str__(self):
         return f"Sale {self.receipt_number}"
