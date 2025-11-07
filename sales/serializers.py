@@ -30,6 +30,7 @@ class SaleSerializer(serializers.ModelSerializer):
     items = SaleItemSerializer(many=True, read_only=True)
     customer_name = serializers.SerializerMethodField()
     payment_method = serializers.SerializerMethodField()
+    split_data = serializers.SerializerMethodField()
     voided_by_name = serializers.SerializerMethodField()
 
     class Meta:
@@ -43,6 +44,11 @@ class SaleSerializer(serializers.ModelSerializer):
         # Get payment method from related payment record
         payment = obj.payment_set.first()
         return payment.payment_type if payment else None
+
+    def get_split_data(self, obj):
+        # Get split payment data from related payment record
+        payment = obj.payment_set.filter(payment_type='split').first()
+        return payment.split_data if payment and payment.split_data else None
 
     def get_voided_by_name(self, obj):
         return obj.voided_by.user.username if obj.voided_by else None

@@ -33,10 +33,7 @@ class StartShiftView(generics.CreateAPIView):
         # Check if there's an open shift
         existing_shift = Shift.objects.filter(cashier=cashier, status='open').first()
         if existing_shift:
-            print(f"StartShiftView: User {cashier.user.username} already has open shift {existing_shift.id}")
             return Response({'error': 'Shift already open'}, status=status.HTTP_400_BAD_REQUEST)
-
-        print(f"StartShiftView: Creating new shift for user {cashier.user.username}")
         shift = Shift.objects.create(cashier=cashier, opening_balance=opening_balance)
         serializer = self.get_serializer(shift)
         return Response(serializer.data, status=status.HTTP_201_CREATED)

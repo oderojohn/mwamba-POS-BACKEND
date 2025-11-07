@@ -3,6 +3,7 @@ from .models import Payment, PaymentLog, InstallmentPlan
 
 class PaymentSerializer(serializers.ModelSerializer):
     sale_receipt = serializers.CharField(source='sale.receipt_number', read_only=True)
+    split_data = serializers.JSONField(required=False, allow_null=True)
 
     class Meta:
         model = Payment

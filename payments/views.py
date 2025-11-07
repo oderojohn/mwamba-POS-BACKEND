@@ -42,7 +42,8 @@ class PaymentViewSet(viewsets.ModelViewSet):
             payment_type_lower = str(payment_type).lower()
             type_mapping = {
                 'cash': 'cash',
-                'mpesa': 'mpesa'
+                'mpesa': 'mpesa',
+                'split': 'split'
             }
 
             normalized_type = type_mapping.get(payment_type_lower, payment_type)
@@ -50,7 +51,7 @@ class PaymentViewSet(viewsets.ModelViewSet):
             if normalized_type not in valid_types:
                 print(f"Invalid payment type: {payment_type}, normalized: {normalized_type}")
                 return Response(
-                    {'error': f'Invalid payment_type "{payment_type}". Must be one of: {valid_types}'},
+                    {'error': f'Invalid payment_type "{payment_type}". Valid methods: cash, mpesa, split'},
                     status=status.HTTP_400_BAD_REQUEST
                 )
 
@@ -130,6 +131,10 @@ class PaymentViewSet(viewsets.ModelViewSet):
                 if request.data.get('sale') is not None:
                     test_data['sale_id'] = request.data['sale']
 
+                # Add split_data if payment type is split
+                if request.data.get('payment_type') == 'split' and request.data.get('split_data'):
+                    test_data['split_data'] = request.data['split_data']
+
                 print(f"Test payment data: {test_data}")
 
                 # Try to validate the data format
@@ -179,6 +184,10 @@ class PaymentViewSet(viewsets.ModelViewSet):
                     payment_data['sale_id'] = request.data['sale']
                 if customer_id:
                     payment_data['customer_id'] = request.data['customer']
+
+                # Add split_data if payment type is split
+                if request.data.get('payment_type') == 'split' and request.data.get('split_data'):
+                    payment_data['split_data'] = request.data['split_data']
 
                 payment = Payment(**payment_data)
                 # Validate the model

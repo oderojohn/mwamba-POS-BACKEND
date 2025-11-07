@@ -327,7 +327,12 @@ class ReportViewSet(viewsets.ModelViewSet):
 class SalesSummaryView(generics.GenericAPIView):
     """Get sales summary for dashboard and reports"""
 
-    def get(self, request):
+    def get(self, request, sale_id=None):
+        # Check if this is a request for a specific sale chit
+        if sale_id:
+            chit_details = self._get_sale_chit_details(sale_id)
+            return Response(chit_details)
+
         # Check if detailed transactions are requested
         if request.query_params.get('detailed_transactions'):
             date_from = request.query_params.get('date_from')
@@ -345,10 +350,10 @@ class SalesSummaryView(generics.GenericAPIView):
 
             return Response(detailed_transactions)
 
-        # Check if chit details for a specific sale are requested
-        sale_id = request.query_params.get('sale_id')
-        if sale_id:
-            chit_details = self._get_sale_chit_details(sale_id)
+        # Check if chit details for a specific sale are requested (legacy support)
+        sale_id_param = request.query_params.get('sale_id')
+        if sale_id_param:
+            chit_details = self._get_sale_chit_details(sale_id_param)
             return Response(chit_details)
 
         # Check if products sold today is requested
@@ -401,10 +406,28 @@ class SalesSummaryView(generics.GenericAPIView):
 
         # Check if no shift_id and no date range (when viewing sales summary for today)
         if not shift_id and not date_from and not date_to:
-            # Return all sales for today
-            today = timezone.now().date()
-            sales_data = self._get_today_all_sales(today)
-            return Response(sales_data)
+            # Return sales for current user's current shift
+            from users.models import UserProfile
+            from shifts.models import Shift
+
+            try:
+                user_profile = request.user.userprofile
+                current_shift = Shift.objects.get(cashier=user_profile, status='open')
+                sales_data = self._get_shift_sales_data(current_shift.id)
+                return Response(sales_data)
+            except (UserProfile.DoesNotExist, Shift.DoesNotExist):
+                # If no current shift, return empty data
+                return Response({
+                    'total_sales': 0,
+                    'total_transactions': 0,
+                    'average_sale': 0,
+                    'today_sales': 0,
+                    'gross_profit': 0,
+                    'net_profit': 0,
+                    'cost_of_goods_sold': 0,
+                    'sales_by_payment_method': {},
+                    'recent_sales': []
+                })
 
         if date_from and date_to:
             # Return historical sales data for the specified range
@@ -688,10 +711,15 @@ class SalesSummaryView(generics.GenericAPIView):
 
     def _get_shift_sales_data(self, shift_id):
         """Get sales data for a specific shift"""
-        from sales.models import Sale
+        from sales.models import Sale, Cart
         from payments.models import Payment
+        from shifts.models import Shift
 
-        # Get sales for the shift (exclude voided sales)
+        # Get the shift to find the cashier
+        shift = Shift.objects.get(id=shift_id)
+        cashier = shift.cashier
+
+        # Get sales for the shift (exclude voided sales for totals)
         sales = Sale.objects.filter(
             shift_id=shift_id,
             voided=False
@@ -702,7 +730,7 @@ class SalesSummaryView(generics.GenericAPIView):
             transaction_count=Count('id')
         ).order_by('date')
 
-        # Get payment method breakdown for the shift
+        # Get payment method breakdown for the shift, including split payment details
         payments = Payment.objects.filter(
             sale__shift_id=shift_id,
             sale__voided=False,
@@ -711,9 +739,27 @@ class SalesSummaryView(generics.GenericAPIView):
             amount=Sum('amount')
         )
 
+        # For split payments, extract the split data
+        split_payments = Payment.objects.filter(
+            sale__shift_id=shift_id,
+            sale__voided=False,
+            status='completed',
+            payment_type='split'
+        )
+
+        split_breakdown = {}
+        for payment in split_payments:
+            if payment.split_data:
+                for method, amount in payment.split_data.items():
+                    split_breakdown[method] = split_breakdown.get(method, 0) + float(amount)
+
         payment_breakdown = {}
         for payment in payments:
             payment_breakdown[payment['payment_type']] = float(payment['amount'])
+
+        # Add split payment breakdown to the main breakdown
+        for method, amount in split_breakdown.items():
+            payment_breakdown[method] = payment_breakdown.get(method, 0) + amount
 
         # Get total sales and transactions for the shift
         total_sales = sum(float(sale['total_sales']) for sale in sales)
@@ -743,11 +789,24 @@ class SalesSummaryView(generics.GenericAPIView):
         # Net profit (estimated as gross profit minus 5% operating costs)
         net_profit = gross_profit * 0.95
 
-        # Get all sales for the shift with payment info (exclude voided)
+        # Get all completed sales for the shift with payment info (exclude voided)
         all_sales = Sale.objects.filter(
             shift_id=shift_id,
             voided=False
-        ).select_related('customer').prefetch_related('payment_set').order_by('-sale_date')
+        ).select_related('customer').prefetch_related('payment_set', 'saleitem_set__product').order_by('-sale_date')
+
+        # Get voided sales for the shift
+        voided_sales = Sale.objects.filter(
+            shift_id=shift_id,
+            voided=True
+        ).select_related('customer').prefetch_related('saleitem_set__product').order_by('-sale_date')
+
+        # Get held orders for the cashier (during this shift period)
+        held_orders = Cart.objects.filter(
+            cashier=cashier,
+            status='held',
+            created_at__gte=shift.start_time
+        ).select_related('customer').prefetch_related('cartitem_set__product').order_by('-created_at')
 
         result = {
             'total_sales': total_sales,
@@ -765,9 +824,61 @@ class SalesSummaryView(generics.GenericAPIView):
                     'total_amount': float(sale.total_amount),
                     'receipt_number': sale.receipt_number,
                     'created_at': sale.sale_date.isoformat(),
-                    'payment_method': sale.payment_set.first().payment_type if sale.payment_set.exists() else 'N/A'
+                    'payment_method': sale.payment_set.first().payment_type if sale.payment_set.exists() else 'N/A',
+                    'sale_type': sale.sale_type,
+                    'items': [
+                        {
+                            'product_name': item.product.name,
+                            'quantity': item.quantity,
+                            'unit_price': float(item.unit_price),
+                            'total': float(item.unit_price * item.quantity)
+                        }
+                        for item in sale.saleitem_set.all()
+                    ],
+                    'split_data': sale.payment_set.filter(payment_type='split').first().split_data if sale.payment_set.filter(payment_type='split').exists() and sale.payment_set.filter(payment_type='split').first().split_data else None
                 }
                 for sale in all_sales
+            ],
+            'voided_sales': [
+                {
+                    'id': sale.id,
+                    'customer': sale.customer.name if sale.customer else 'Walk-in',
+                    'total_amount': float(sale.total_amount),
+                    'receipt_number': sale.receipt_number,
+                    'created_at': sale.sale_date.isoformat(),
+                    'void_reason': sale.void_reason,
+                    'voided_at': sale.voided_at.isoformat() if sale.voided_at else None,
+                    'items': [
+                        {
+                            'product_name': item.product.name,
+                            'quantity': item.quantity,
+                            'unit_price': float(item.unit_price),
+                            'total': float(item.unit_price * item.quantity)
+                        }
+                        for item in sale.saleitem_set.all()
+                    ]
+                }
+                for sale in voided_sales
+            ],
+            'held_orders': [
+                {
+                    'id': cart.id,
+                    'customer': cart.customer.name if cart.customer else 'Walk-in',
+                    'total_amount': float(sum(item.unit_price * item.quantity for item in cart.cartitem_set.all())),
+                    'created_at': cart.created_at.isoformat(),
+                    'status': cart.status,
+                    'void_reason': cart.void_reason,
+                    'items': [
+                        {
+                            'product_name': item.product.name,
+                            'quantity': item.quantity,
+                            'unit_price': float(item.unit_price),
+                            'total': float(item.unit_price * item.quantity)
+                        }
+                        for item in cart.cartitem_set.all()
+                    ]
+                }
+                for cart in held_orders
             ]
         }
 
@@ -798,6 +909,20 @@ class SalesSummaryView(generics.GenericAPIView):
         ).values('payment_type').annotate(
             amount=Sum('amount')
         )
+
+        # For split payments, extract the split data
+        split_payments = Payment.objects.filter(
+            sale__sale_date__date=date,
+            sale__voided=False,
+            status='completed',
+            payment_type='split'
+        )
+
+        split_breakdown = {}
+        for payment in split_payments:
+            if payment.split_data:
+                for method, amount in payment.split_data.items():
+                    split_breakdown[method] = split_breakdown.get(method, 0) + float(amount)
 
         payment_breakdown = {}
         for payment in payments:
@@ -834,7 +959,7 @@ class SalesSummaryView(generics.GenericAPIView):
         all_sales = Sale.objects.filter(
             sale_date__date=date,
             voided=False
-        ).select_related('customer').prefetch_related('payment_set').order_by('-sale_date')
+        ).select_related('customer').prefetch_related('payment_set', 'saleitem_set__product').order_by('-sale_date')
 
         result = {
             'total_sales': total_sales,
@@ -852,7 +977,18 @@ class SalesSummaryView(generics.GenericAPIView):
                     'total_amount': float(sale.final_amount),
                     'receipt_number': sale.receipt_number,
                     'created_at': sale.sale_date.isoformat(),
-                    'payment_method': sale.payment_set.first().payment_type if sale.payment_set.exists() else 'N/A'
+                    'payment_method': sale.payment_set.first().payment_type if sale.payment_set.exists() else 'N/A',
+                    'sale_type': sale.sale_type,
+                    'items': [
+                        {
+                            'product_name': item.product.name,
+                            'quantity': item.quantity,
+                            'unit_price': float(item.unit_price),
+                            'total': float(item.unit_price * item.quantity)
+                        }
+                        for item in sale.saleitem_set.all()
+                    ],
+                    'split_data': sale.payment_set.filter(payment_type='split').first().split_data if sale.payment_set.filter(payment_type='split').exists() and sale.payment_set.filter(payment_type='split').first().split_data else None
                 }
                 for sale in all_sales
             ]

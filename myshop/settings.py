@@ -85,19 +85,19 @@ WSGI_APPLICATION = 'myshop.wsgi.application'
 
 # ✅ Database (SQLite for now, switchable to Postgres later)
 
-DATABASES = {
-    'default': dj_database_url.parse(
-        'postgresql://neondb_owner:npg_6zcA5DHaPqdL@ep-curly-dust-adhlqx3r-pooler.c-2.us-east-1.aws.neon.tech/neondb?sslmode=require&channel_binding=require',
-        conn_max_age=600,
-        ssl_require=True
-    )
-}
 # DATABASES = {
-#     'default': {
-#         'ENGINE': 'django.db.backends.sqlite3',
-#         'NAME': BASE_DIR / 'db.sqlite3',
-#     }
+#     'default': dj_database_url.parse(
+#         'postgresql://neondb_owner:npg_6zcA5DHaPqdL@ep-curly-dust-adhlqx3r-pooler.c-2.us-east-1.aws.neon.tech/neondb?sslmode=require&channel_binding=require',
+#         conn_max_age=600,
+#         ssl_require=True
+#     )
 # }
+DATABASES = {
+    'default': {
+        'ENGINE': 'django.db.backends.sqlite3',
+        'NAME': BASE_DIR / 'db.sqlite3',
+    }
+}
 
 # Password validation
 AUTH_PASSWORD_VALIDATORS = [
@@ -151,7 +151,7 @@ SESSION_CACHE_ALIAS = "default"
 
 # ✅ CORS settings
 CORS_ALLOWED_ORIGINS = [
-    "http://localhost:3002",
+    "http://localhost:3003",
     "http://localhost:5173",
     "http://127.0.0.1:3000",
     "http://127.0.0.1:5173",

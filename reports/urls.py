@@ -15,4 +15,5 @@ urlpatterns = [
     path('customer-summary/', CustomerSummaryView.as_view(), name='customer-summary'),
     path('shift-summary/', ShiftSummaryView.as_view(), name='shift-summary'),
     path('profitloss-summary/', SalesSummaryView.as_view(), name='profitloss-summary'),
+    path('sales-chit/<int:sale_id>/', SalesSummaryView.as_view(), name='sales-chit'),
 ]

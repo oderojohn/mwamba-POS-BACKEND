@@ -10,6 +10,7 @@ from .models import Cart, CartItem, Sale, SaleItem, Return, Invoice, InvoiceItem
 from .serializers import CartSerializer, CartItemSerializer, SaleSerializer, SaleItemSerializer, ReturnSerializer, InvoiceSerializer, InvoiceItemSerializer
 from inventory.models import Product, StockMovement, SalesHistory
 from shifts.models import Shift
+from payments.models import Payment
 
 class CartViewSet(viewsets.ModelViewSet):
     queryset = Cart.objects.all()
@@ -117,17 +118,12 @@ class SaleViewSet(viewsets.ModelViewSet):
                     split_data = request.data.get('split_data', {})
                     cash_amount = Decimal(str(split_data.get('cash', 0)))
                     mpesa_amount = Decimal(str(split_data.get('mpesa', 0)))
-                    card_amount = Decimal(str(split_data.get('card', 0)))
                     current_shift.cash_sales = F('cash_sales') + cash_amount
                     current_shift.mobile_sales = F('mobile_sales') + mpesa_amount
-                    current_shift.card_sales = F('card_sales') + card_amount
-                    update_fields.extend(['cash_sales', 'mobile_sales', 'card_sales'])
+                    update_fields.extend(['cash_sales', 'mobile_sales'])
                 elif payment_method == 'cash':
                     current_shift.cash_sales = F('cash_sales') + sale_amount
                     update_fields.append('cash_sales')
-                elif payment_method == 'card':
-                    current_shift.card_sales = F('card_sales') + sale_amount
-                    update_fields.append('card_sales')
                 elif payment_method in ['mpesa', 'mobile']:
                     current_shift.mobile_sales = F('mobile_sales') + sale_amount
                     update_fields.append('mobile_sales')
@@ -251,6 +247,43 @@ class SaleViewSet(viewsets.ModelViewSet):
                             receipt_number=sale.receipt_number,
                             sale_date=sale.sale_date
                         )
+
+                # Create payment record for the sale
+                payment_method = request.data.get('payment_method', 'cash').lower()
+                if payment_method == 'split':
+                    # For split payments, create multiple payment records
+                    split_data = request.data.get('split_data', {})
+                    cash_amount = split_data.get('cash', 0)
+                    mpesa_amount = split_data.get('mpesa', 0)
+
+                    if cash_amount > 0:
+                        Payment.objects.create(
+                            sale=sale,
+                            payment_type='cash',
+                            amount=cash_amount,
+                            status='completed'
+                        )
+                    if mpesa_amount > 0:
+                        Payment.objects.create(
+                            sale=sale,
+                            payment_type='mpesa',
+                            amount=mpesa_amount,
+                            mpesa_number=request.data.get('mpesa_number', ''),
+                            status='completed'
+                        )
+                else:
+                    # Single payment method
+                    payment_type = 'cash'
+                    if payment_method in ['mpesa', 'mobile']:
+                        payment_type = 'mpesa'
+
+                    Payment.objects.create(
+                        sale=sale,
+                        payment_type=payment_type,
+                        amount=total_amount,
+                        mpesa_number=request.data.get('mpesa_number', '') if payment_type == 'mpesa' else '',
+                        status='completed'
+                    )
 
                 # Update cart status to closed
                 cart.status = 'closed'
@@ -606,17 +639,12 @@ class SaleViewSet(viewsets.ModelViewSet):
                         split_data = request.data.get('split_data', {})
                         cash_amount = Decimal(str(split_data.get('cash', 0)))
                         mpesa_amount = Decimal(str(split_data.get('mpesa', 0)))
-                        card_amount = Decimal(str(split_data.get('card', 0)))
                         current_shift.cash_sales = F('cash_sales') + cash_amount
                         current_shift.mobile_sales = F('mobile_sales') + mpesa_amount
-                        current_shift.card_sales = F('card_sales') + card_amount
-                        update_fields.extend(['cash_sales', 'mobile_sales', 'card_sales'])
+                        update_fields.extend(['cash_sales', 'mobile_sales'])
                     elif payment_method == 'cash':
                         current_shift.cash_sales = F('cash_sales') + sale_amount
                         update_fields.append('cash_sales')
-                    elif payment_method == 'card':
-                        current_shift.card_sales = F('card_sales') + sale_amount
-                        update_fields.append('card_sales')
                     elif payment_method in ['mpesa', 'mobile']:
                         current_shift.mobile_sales = F('mobile_sales') + sale_amount
                         update_fields.append('mobile_sales')
@@ -738,8 +766,42 @@ class SaleViewSet(viewsets.ModelViewSet):
                             sale_date=sale.sale_date
                         )
 
-                # Payment creation is handled separately by the frontend via payments API
-                # No payment logic needed here
+                # Create payment record for the sale
+                payment_method = request.data.get('payment_method', 'cash').lower()
+                if payment_method == 'split':
+                    # For split payments, create multiple payment records
+                    split_data = request.data.get('split_data', {})
+                    cash_amount = split_data.get('cash', 0)
+                    mpesa_amount = split_data.get('mpesa', 0)
+
+                    if cash_amount > 0:
+                        Payment.objects.create(
+                            sale=sale,
+                            payment_type='cash',
+                            amount=cash_amount,
+                            status='completed'
+                        )
+                    if mpesa_amount > 0:
+                        Payment.objects.create(
+                            sale=sale,
+                            payment_type='mpesa',
+                            amount=mpesa_amount,
+                            mpesa_number=request.data.get('mpesa_number', ''),
+                            status='completed'
+                        )
+                else:
+                    # Single payment method
+                    payment_type = 'cash'
+                    if payment_method in ['mpesa', 'mobile']:
+                        payment_type = 'mpesa'
+
+                    Payment.objects.create(
+                        sale=sale,
+                        payment_type=payment_type,
+                        amount=total_amount,
+                        mpesa_number=request.data.get('mpesa_number', '') if payment_type == 'mpesa' else '',
+                        status='completed'
+                    )
 
                 # Serialize and return the sale
                 serializer = self.get_serializer(sale)

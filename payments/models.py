@@ -6,6 +6,7 @@ class Payment(models.Model):
     PAYMENT_TYPES = [
         ('cash', 'Cash'),
         ('mpesa', 'MPesa'),
+        ('split', 'Split'),
     ]
 
     sale = models.ForeignKey('sales.Sale', on_delete=models.CASCADE, null=True, blank=True)
@@ -16,6 +17,7 @@ class Payment(models.Model):
     mpesa_number = models.CharField(max_length=20, blank=True, null=True)  # Store MPesa number for MPesa payments
     gateway_response = models.TextField(blank=True)
     description = models.CharField(max_length=255, blank=True, null=True)
+    split_data = models.JSONField(blank=True, null=True, help_text="Split payment data for split payments")
     status = models.CharField(max_length=20, choices=[
         ('pending', 'Pending'),
         ('completed', 'Completed'),
