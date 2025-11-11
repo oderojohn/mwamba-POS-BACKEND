@@ -343,6 +343,10 @@ class SaleViewSet(viewsets.ModelViewSet):
                 user_error = '❌ Payment Error'
                 user_message = 'There was an issue processing the payment.'
                 user_details = 'Please check your payment details and try again.'
+            elif 'split payment requires' in error_message.lower():
+                user_error = '❌ Payment Error'
+                user_message = 'Split payment requires cash and/or M-Pesa amounts.'
+                user_details = 'Please enter valid amounts for both payment methods or choose a single payment method.'
             else:
                 user_error = '❌ Order Completion Error'
                 user_message = 'An unexpected error occurred while completing the order.'
@@ -892,6 +896,10 @@ class SaleViewSet(viewsets.ModelViewSet):
                 user_error = '❌ Credit Limit Exceeded'
                 user_message = 'The customer has exceeded their credit limit.'
                 user_details = 'Please choose a different payment method or contact the customer.'
+            elif 'split payment requires' in error_message.lower():
+                user_error = '❌ Payment Error'
+                user_message = 'Split payment requires cash and/or M-Pesa amounts.'
+                user_details = 'Please enter valid amounts for both payment methods or choose a single payment method.'
             else:
                 user_error = '❌ Sale Error'
                 user_message = 'An unexpected error occurred while processing the sale.'
