@@ -268,10 +268,7 @@ class SaleViewSet(viewsets.ModelViewSet):
                 if payment_method == 'split':
                     split_data = request.data.get('split_data', {})
                     if not split_data or (split_data.get('cash', 0) == 0 and split_data.get('mpesa', 0) == 0):
-                        return Response(
-                            {'error': 'Split payment requires cash and/or mpesa amounts in split_data'},
-                            status=status.HTTP_400_BAD_REQUEST
-                        )
+                        raise ValueError('Split payment requires cash and/or mpesa amounts in split_data')
 
                 # Create payment record for the sale
                 created_payments = []
@@ -824,10 +821,7 @@ class SaleViewSet(viewsets.ModelViewSet):
                 if payment_method == 'split':
                     split_data = request.data.get('split_data', {})
                     if not split_data or (split_data.get('cash', 0) == 0 and split_data.get('mpesa', 0) == 0):
-                        return Response(
-                            {'error': 'Split payment requires cash and/or mpesa amounts in split_data'},
-                            status=status.HTTP_400_BAD_REQUEST
-                        )
+                        raise ValueError('Split payment requires cash and/or mpesa amounts in split_data')
 
                 # Create payment record for the sale
                 created_payments = []
