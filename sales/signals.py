@@ -9,8 +9,9 @@ def create_default_payment(sender, instance, created, **kwargs):
     Create a default payment record for sales that don't have any payment.
     This ensures that every sale always has at least one payment record,
     preventing 'N/A' from appearing in payment method displays.
+    Only runs for newly created sales.
     """
-    if not instance.voided and not instance.payment_set.exists():
+    if created and not instance.voided and not instance.payment_set.exists():
         # Create a default cash payment for the sale
         Payment.objects.create(
             sale=instance,

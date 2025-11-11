@@ -38,25 +38,47 @@ class SaleSerializer(serializers.ModelSerializer):
         fields = '__all__'
 
     def get_customer_name(self, obj):
-        return obj.customer.name if obj.customer else None
+        try:
+            return obj.customer.name if obj.customer else None
+        except AttributeError:
+            return None
 
     def get_payment_method(self, obj):
-        # Get payment method from related payment record
-        payment = obj.payment_set.first()
-        if payment:
-            return payment.payment_type
-        else:
+        # Get payment method from related payment records
+        payments = obj.payment_set.all()
+        if not payments:
             # Fallback: return 'cash' to prevent N/A display
             # This should not happen due to validation, but provides safety net
             return 'cash'
 
+        # If multiple payments, it's a split payment
+        if len(payments) > 1:
+            return 'split'
+
+        # Single payment
+        return payments[0].payment_type
+
     def get_split_data(self, obj):
-        # Get split payment data from related payment record
-        payment = obj.payment_set.filter(payment_type='split').first()
-        return payment.split_data if payment and payment.split_data else None
+        # Get split payment data from multiple payment records
+        payments = obj.payment_set.all()
+        if len(payments) <= 1:
+            return None
+
+        # For split payments, collect amounts from cash and mpesa payments
+        split_data = {}
+        for payment in payments:
+            if payment.payment_type == 'cash':
+                split_data['cash'] = float(payment.amount)
+            elif payment.payment_type == 'mpesa':
+                split_data['mpesa'] = float(payment.amount)
+
+        return split_data if split_data else None
 
     def get_voided_by_name(self, obj):
-        return obj.voided_by.user.username if obj.voided_by else None
+        try:
+            return obj.voided_by.user.username if obj.voided_by else None
+        except AttributeError:
+            return None
 
 class ReturnSerializer(serializers.ModelSerializer):
     sale_receipt = serializers.CharField(source='sale.receipt_number', read_only=True)

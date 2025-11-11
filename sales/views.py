@@ -275,61 +275,53 @@ class SaleViewSet(viewsets.ModelViewSet):
 
                 # Create payment record for the sale
                 created_payments = []
-                try:
-                    if payment_method == 'split':
-                        # For split payments, create multiple payment records
-                        split_data = request.data.get('split_data', {})
-                        cash_amount = split_data.get('cash', 0)
-                        mpesa_amount = split_data.get('mpesa', 0)
+                if payment_method == 'split':
+                    # For split payments, create multiple payment records
+                    split_data = request.data.get('split_data', {})
+                    cash_amount = split_data.get('cash', 0)
+                    mpesa_amount = split_data.get('mpesa', 0)
 
-                        if cash_amount > 0:
-                            payment = Payment.objects.create(
-                                sale=sale,
-                                payment_type='cash',
-                                amount=cash_amount,
-                                status='completed'
-                            )
-                            created_payments.append(payment)
-
-                        if mpesa_amount > 0:
-                            payment = Payment.objects.create(
-                                sale=sale,
-                                payment_type='mpesa',
-                                amount=mpesa_amount,
-                                mpesa_number=request.data.get('mpesa_number', ''),
-                                status='completed'
-                            )
-                            created_payments.append(payment)
-                    else:
-                        # Single payment method
-                        payment_type = 'cash'
-                        if payment_method in ['mpesa', 'mobile']:
-                            payment_type = 'mpesa'
-
+                    if cash_amount > 0:
                         payment = Payment.objects.create(
                             sale=sale,
-                            payment_type=payment_type,
-                            amount=total_amount,
-                            mpesa_number=request.data.get('mpesa_number', '') if payment_type == 'mpesa' else '',
+                            payment_type='cash',
+                            amount=cash_amount,
                             status='completed'
                         )
                         created_payments.append(payment)
 
-                    # CRITICAL VALIDATION: Ensure at least one payment was created
-                    if not created_payments:
-                        raise ValueError("No payment records were created for this transaction")
+                    if mpesa_amount > 0:
+                        payment = Payment.objects.create(
+                            sale=sale,
+                            payment_type='mpesa',
+                            amount=mpesa_amount,
+                            mpesa_number=request.data.get('mpesa_number', ''),
+                            status='completed'
+                        )
+                        created_payments.append(payment)
+                else:
+                    # Single payment method
+                    payment_type = 'cash'
+                    if payment_method in ['mpesa', 'mobile']:
+                        payment_type = 'mpesa'
 
-                    # Verify payment amounts total matches sale amount
-                    total_payment_amount = sum(float(p.amount) for p in created_payments)
-                    if abs(total_payment_amount - float(total_amount)) > 0.01:  # Allow small floating point differences
-                        raise ValueError(f"Payment amount mismatch: payments total {total_payment_amount}, sale total {total_amount}")
-
-                except Exception as payment_error:
-                    print(f"Payment creation failed: {str(payment_error)}")
-                    return Response(
-                        {'error': f'Payment processing failed: {str(payment_error)}'},
-                        status=status.HTTP_400_BAD_REQUEST
+                    payment = Payment.objects.create(
+                        sale=sale,
+                        payment_type=payment_type,
+                        amount=total_amount,
+                        mpesa_number=request.data.get('mpesa_number', '') if payment_type == 'mpesa' else '',
+                        status='completed'
                     )
+                    created_payments.append(payment)
+
+                # CRITICAL VALIDATION: Ensure at least one payment was created
+                if not created_payments:
+                    raise ValueError("No payment records were created for this transaction")
+
+                # Verify payment amounts total matches sale amount
+                total_payment_amount = sum(float(p.amount) for p in created_payments)
+                if abs(total_payment_amount - float(total_amount)) > 0.01:  # Allow small floating point differences
+                    raise ValueError(f"Payment amount mismatch: payments total {total_payment_amount}, sale total {total_amount}")
 
                 # Update cart status to closed
                 cart.status = 'closed'
@@ -839,61 +831,53 @@ class SaleViewSet(viewsets.ModelViewSet):
 
                 # Create payment record for the sale
                 created_payments = []
-                try:
-                    if payment_method == 'split':
-                        # For split payments, create multiple payment records
-                        split_data = request.data.get('split_data', {})
-                        cash_amount = split_data.get('cash', 0)
-                        mpesa_amount = split_data.get('mpesa', 0)
+                if payment_method == 'split':
+                    # For split payments, create multiple payment records
+                    split_data = request.data.get('split_data', {})
+                    cash_amount = split_data.get('cash', 0)
+                    mpesa_amount = split_data.get('mpesa', 0)
 
-                        if cash_amount > 0:
-                            payment = Payment.objects.create(
-                                sale=sale,
-                                payment_type='cash',
-                                amount=cash_amount,
-                                status='completed'
-                            )
-                            created_payments.append(payment)
-
-                        if mpesa_amount > 0:
-                            payment = Payment.objects.create(
-                                sale=sale,
-                                payment_type='mpesa',
-                                amount=mpesa_amount,
-                                mpesa_number=request.data.get('mpesa_number', ''),
-                                status='completed'
-                            )
-                            created_payments.append(payment)
-                    else:
-                        # Single payment method
-                        payment_type = 'cash'
-                        if payment_method in ['mpesa', 'mobile']:
-                            payment_type = 'mpesa'
-
+                    if cash_amount > 0:
                         payment = Payment.objects.create(
                             sale=sale,
-                            payment_type=payment_type,
-                            amount=total_amount,
-                            mpesa_number=request.data.get('mpesa_number', '') if payment_type == 'mpesa' else '',
+                            payment_type='cash',
+                            amount=cash_amount,
                             status='completed'
                         )
                         created_payments.append(payment)
 
-                    # CRITICAL VALIDATION: Ensure at least one payment was created
-                    if not created_payments:
-                        raise ValueError("No payment records were created for this transaction")
+                    if mpesa_amount > 0:
+                        payment = Payment.objects.create(
+                            sale=sale,
+                            payment_type='mpesa',
+                            amount=mpesa_amount,
+                            mpesa_number=request.data.get('mpesa_number', ''),
+                            status='completed'
+                        )
+                        created_payments.append(payment)
+                else:
+                    # Single payment method
+                    payment_type = 'cash'
+                    if payment_method in ['mpesa', 'mobile']:
+                        payment_type = 'mpesa'
 
-                    # Verify payment amounts total matches sale amount
-                    total_payment_amount = sum(float(p.amount) for p in created_payments)
-                    if abs(total_payment_amount - float(total_amount)) > 0.01:  # Allow small floating point differences
-                        raise ValueError(f"Payment amount mismatch: payments total {total_payment_amount}, sale total {total_amount}")
-
-                except Exception as payment_error:
-                    print(f"Payment creation failed: {str(payment_error)}")
-                    return Response(
-                        {'error': f'Payment processing failed: {str(payment_error)}'},
-                        status=status.HTTP_400_BAD_REQUEST
+                    payment = Payment.objects.create(
+                        sale=sale,
+                        payment_type=payment_type,
+                        amount=total_amount,
+                        mpesa_number=request.data.get('mpesa_number', '') if payment_type == 'mpesa' else '',
+                        status='completed'
                     )
+                    created_payments.append(payment)
+
+                # CRITICAL VALIDATION: Ensure at least one payment was created
+                if not created_payments:
+                    raise ValueError("No payment records were created for this transaction")
+
+                # Verify payment amounts total matches sale amount
+                total_payment_amount = sum(float(p.amount) for p in created_payments)
+                if abs(total_payment_amount - float(total_amount)) > 0.01:  # Allow small floating point differences
+                    raise ValueError(f"Payment amount mismatch: payments total {total_payment_amount}, sale total {total_amount}")
 
                 # Serialize and return the sale
                 serializer = self.get_serializer(sale)
