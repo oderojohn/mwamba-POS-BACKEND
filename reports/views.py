@@ -824,7 +824,7 @@ class SalesSummaryView(generics.GenericAPIView):
                     'total_amount': float(sale.total_amount),
                     'receipt_number': sale.receipt_number,
                     'created_at': sale.sale_date.isoformat(),
-                    'payment_method': sale.payment_set.first().payment_type if sale.payment_set.exists() else 'N/A',
+                    'payment_method': sale.payment_set.first().payment_type if sale.payment_set.exists() else 'cash',
                     'sale_type': sale.sale_type,
                     'items': [
                         {
@@ -977,7 +977,7 @@ class SalesSummaryView(generics.GenericAPIView):
                     'total_amount': float(sale.final_amount),
                     'receipt_number': sale.receipt_number,
                     'created_at': sale.sale_date.isoformat(),
-                    'payment_method': sale.payment_set.first().payment_type if sale.payment_set.exists() else 'N/A',
+                    'payment_method': sale.payment_set.first().payment_type if sale.payment_set.exists() else 'cash',
                     'sale_type': sale.sale_type,
                     'items': [
                         {

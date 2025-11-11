@@ -248,41 +248,87 @@ class SaleViewSet(viewsets.ModelViewSet):
                             sale_date=sale.sale_date
                         )
 
-                # Create payment record for the sale
-                payment_method = request.data.get('payment_method', 'cash').lower()
+                # STRICT VALIDATION: Require payment method and ensure payment creation succeeds
+                payment_method = request.data.get('payment_method', '').strip().lower()
+                if not payment_method:
+                    return Response(
+                        {'error': 'Payment method is required for all transactions'},
+                        status=status.HTTP_400_BAD_REQUEST
+                    )
+
+                # Validate payment method
+                valid_payment_methods = ['cash', 'mpesa', 'mobile', 'split']
+                if payment_method not in valid_payment_methods:
+                    return Response(
+                        {'error': f'Invalid payment method. Must be one of: {", ".join(valid_payment_methods)}'},
+                        status=status.HTTP_400_BAD_REQUEST
+                    )
+
+                # Validate split payment data if split method selected
                 if payment_method == 'split':
-                    # For split payments, create multiple payment records
                     split_data = request.data.get('split_data', {})
-                    cash_amount = split_data.get('cash', 0)
-                    mpesa_amount = split_data.get('mpesa', 0)
+                    if not split_data or (split_data.get('cash', 0) == 0 and split_data.get('mpesa', 0) == 0):
+                        return Response(
+                            {'error': 'Split payment requires cash and/or mpesa amounts in split_data'},
+                            status=status.HTTP_400_BAD_REQUEST
+                        )
 
-                    if cash_amount > 0:
-                        Payment.objects.create(
+                # Create payment record for the sale
+                created_payments = []
+                try:
+                    if payment_method == 'split':
+                        # For split payments, create multiple payment records
+                        split_data = request.data.get('split_data', {})
+                        cash_amount = split_data.get('cash', 0)
+                        mpesa_amount = split_data.get('mpesa', 0)
+
+                        if cash_amount > 0:
+                            payment = Payment.objects.create(
+                                sale=sale,
+                                payment_type='cash',
+                                amount=cash_amount,
+                                status='completed'
+                            )
+                            created_payments.append(payment)
+
+                        if mpesa_amount > 0:
+                            payment = Payment.objects.create(
+                                sale=sale,
+                                payment_type='mpesa',
+                                amount=mpesa_amount,
+                                mpesa_number=request.data.get('mpesa_number', ''),
+                                status='completed'
+                            )
+                            created_payments.append(payment)
+                    else:
+                        # Single payment method
+                        payment_type = 'cash'
+                        if payment_method in ['mpesa', 'mobile']:
+                            payment_type = 'mpesa'
+
+                        payment = Payment.objects.create(
                             sale=sale,
-                            payment_type='cash',
-                            amount=cash_amount,
+                            payment_type=payment_type,
+                            amount=total_amount,
+                            mpesa_number=request.data.get('mpesa_number', '') if payment_type == 'mpesa' else '',
                             status='completed'
                         )
-                    if mpesa_amount > 0:
-                        Payment.objects.create(
-                            sale=sale,
-                            payment_type='mpesa',
-                            amount=mpesa_amount,
-                            mpesa_number=request.data.get('mpesa_number', ''),
-                            status='completed'
-                        )
-                else:
-                    # Single payment method
-                    payment_type = 'cash'
-                    if payment_method in ['mpesa', 'mobile']:
-                        payment_type = 'mpesa'
+                        created_payments.append(payment)
 
-                    Payment.objects.create(
-                        sale=sale,
-                        payment_type=payment_type,
-                        amount=total_amount,
-                        mpesa_number=request.data.get('mpesa_number', '') if payment_type == 'mpesa' else '',
-                        status='completed'
+                    # CRITICAL VALIDATION: Ensure at least one payment was created
+                    if not created_payments:
+                        raise ValueError("No payment records were created for this transaction")
+
+                    # Verify payment amounts total matches sale amount
+                    total_payment_amount = sum(float(p.amount) for p in created_payments)
+                    if abs(total_payment_amount - float(total_amount)) > 0.01:  # Allow small floating point differences
+                        raise ValueError(f"Payment amount mismatch: payments total {total_payment_amount}, sale total {total_amount}")
+
+                except Exception as payment_error:
+                    print(f"Payment creation failed: {str(payment_error)}")
+                    return Response(
+                        {'error': f'Payment processing failed: {str(payment_error)}'},
+                        status=status.HTTP_400_BAD_REQUEST
                     )
 
                 # Update cart status to closed
@@ -766,41 +812,87 @@ class SaleViewSet(viewsets.ModelViewSet):
                             sale_date=sale.sale_date
                         )
 
-                # Create payment record for the sale
-                payment_method = request.data.get('payment_method', 'cash').lower()
+                # STRICT VALIDATION: Require payment method and ensure payment creation succeeds
+                payment_method = request.data.get('payment_method', '').strip().lower()
+                if not payment_method:
+                    return Response(
+                        {'error': 'Payment method is required for all transactions'},
+                        status=status.HTTP_400_BAD_REQUEST
+                    )
+
+                # Validate payment method
+                valid_payment_methods = ['cash', 'mpesa', 'mobile', 'split']
+                if payment_method not in valid_payment_methods:
+                    return Response(
+                        {'error': f'Invalid payment method. Must be one of: {", ".join(valid_payment_methods)}'},
+                        status=status.HTTP_400_BAD_REQUEST
+                    )
+
+                # Validate split payment data if split method selected
                 if payment_method == 'split':
-                    # For split payments, create multiple payment records
                     split_data = request.data.get('split_data', {})
-                    cash_amount = split_data.get('cash', 0)
-                    mpesa_amount = split_data.get('mpesa', 0)
+                    if not split_data or (split_data.get('cash', 0) == 0 and split_data.get('mpesa', 0) == 0):
+                        return Response(
+                            {'error': 'Split payment requires cash and/or mpesa amounts in split_data'},
+                            status=status.HTTP_400_BAD_REQUEST
+                        )
 
-                    if cash_amount > 0:
-                        Payment.objects.create(
+                # Create payment record for the sale
+                created_payments = []
+                try:
+                    if payment_method == 'split':
+                        # For split payments, create multiple payment records
+                        split_data = request.data.get('split_data', {})
+                        cash_amount = split_data.get('cash', 0)
+                        mpesa_amount = split_data.get('mpesa', 0)
+
+                        if cash_amount > 0:
+                            payment = Payment.objects.create(
+                                sale=sale,
+                                payment_type='cash',
+                                amount=cash_amount,
+                                status='completed'
+                            )
+                            created_payments.append(payment)
+
+                        if mpesa_amount > 0:
+                            payment = Payment.objects.create(
+                                sale=sale,
+                                payment_type='mpesa',
+                                amount=mpesa_amount,
+                                mpesa_number=request.data.get('mpesa_number', ''),
+                                status='completed'
+                            )
+                            created_payments.append(payment)
+                    else:
+                        # Single payment method
+                        payment_type = 'cash'
+                        if payment_method in ['mpesa', 'mobile']:
+                            payment_type = 'mpesa'
+
+                        payment = Payment.objects.create(
                             sale=sale,
-                            payment_type='cash',
-                            amount=cash_amount,
+                            payment_type=payment_type,
+                            amount=total_amount,
+                            mpesa_number=request.data.get('mpesa_number', '') if payment_type == 'mpesa' else '',
                             status='completed'
                         )
-                    if mpesa_amount > 0:
-                        Payment.objects.create(
-                            sale=sale,
-                            payment_type='mpesa',
-                            amount=mpesa_amount,
-                            mpesa_number=request.data.get('mpesa_number', ''),
-                            status='completed'
-                        )
-                else:
-                    # Single payment method
-                    payment_type = 'cash'
-                    if payment_method in ['mpesa', 'mobile']:
-                        payment_type = 'mpesa'
+                        created_payments.append(payment)
 
-                    Payment.objects.create(
-                        sale=sale,
-                        payment_type=payment_type,
-                        amount=total_amount,
-                        mpesa_number=request.data.get('mpesa_number', '') if payment_type == 'mpesa' else '',
-                        status='completed'
+                    # CRITICAL VALIDATION: Ensure at least one payment was created
+                    if not created_payments:
+                        raise ValueError("No payment records were created for this transaction")
+
+                    # Verify payment amounts total matches sale amount
+                    total_payment_amount = sum(float(p.amount) for p in created_payments)
+                    if abs(total_payment_amount - float(total_amount)) > 0.01:  # Allow small floating point differences
+                        raise ValueError(f"Payment amount mismatch: payments total {total_payment_amount}, sale total {total_amount}")
+
+                except Exception as payment_error:
+                    print(f"Payment creation failed: {str(payment_error)}")
+                    return Response(
+                        {'error': f'Payment processing failed: {str(payment_error)}'},
+                        status=status.HTTP_400_BAD_REQUEST
                     )
 
                 # Serialize and return the sale

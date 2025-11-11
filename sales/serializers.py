@@ -43,7 +43,12 @@ class SaleSerializer(serializers.ModelSerializer):
     def get_payment_method(self, obj):
         # Get payment method from related payment record
         payment = obj.payment_set.first()
-        return payment.payment_type if payment else None
+        if payment:
+            return payment.payment_type
+        else:
+            # Fallback: return 'cash' to prevent N/A display
+            # This should not happen due to validation, but provides safety net
+            return 'cash'
 
     def get_split_data(self, obj):
         # Get split payment data from related payment record
