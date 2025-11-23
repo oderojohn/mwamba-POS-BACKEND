@@ -25,13 +25,74 @@ class Product(models.Model):
     is_active = models.BooleanField(default=True)
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
-    
+
     def __str__(self):
         return f"{self.sku} - {self.name}"
-    
+
     @property
     def is_low_stock(self):
         return self.stock_quantity <= self.low_stock_threshold
+
+    def save(self, *args, **kwargs):
+        # Track changes for history logging
+        is_new = self.pk is None
+        old_instance = None
+
+        if not is_new:
+            try:
+                old_instance = Product.objects.get(pk=self.pk)
+            except Product.DoesNotExist:
+                is_new = True
+
+        super().save(*args, **kwargs)  # Save first to get pk for new instances
+
+        if is_new:
+            # New product
+            ProductHistory.objects.create(
+                product=self,
+                change_type='create',
+                notes='Product created'
+            )
+        else:
+            # Existing product - log changes
+            self._log_changes(old_instance)
+
+    def _log_changes(self, old_instance):
+        """Log changes to product fields"""
+        from django.contrib.auth import get_user_model
+        User = get_user_model()
+
+        # Fields to track
+        tracked_fields = [
+            'name', 'sku', 'cost_price', 'selling_price', 'wholesale_price',
+            'wholesale_min_qty', 'stock_quantity', 'low_stock_threshold',
+            'barcode', 'description', 'is_active', 'category'
+        ]
+
+        for field in tracked_fields:
+            old_value = getattr(old_instance, field)
+            new_value = getattr(self, field)
+
+            if old_value != new_value:
+                # Get current user if available
+                user = None
+                try:
+                    from django.utils.deprecation import MiddlewareMixin
+                    from django.contrib.auth.middleware import get_user
+                    # This is a simplified way; in practice, you'd need request context
+                    user = None  # TODO: Implement proper user tracking
+                except:
+                    pass
+
+                ProductHistory.objects.create(
+                    product=self,
+                    field_changed=field,
+                    old_value=str(old_value) if old_value is not None else '',
+                    new_value=str(new_value) if new_value is not None else '',
+                    change_type='update',
+                    user=user,
+                    notes=f'Updated {field}'
+                )
 
 class Batch(models.Model):
     BATCH_STATUS = [
@@ -158,3 +219,23 @@ class SalesHistory(models.Model):
 
     def __str__(self):
         return f"Sale {self.receipt_number} - {self.product.name} - Batch {self.batch.batch_number if self.batch else 'N/A'}"
+
+class ProductHistory(models.Model):
+    product = models.ForeignKey(Product, on_delete=models.CASCADE)
+    field_changed = models.CharField(max_length=100)  # e.g., 'selling_price', 'stock_quantity'
+    old_value = models.TextField(blank=True, null=True)
+    new_value = models.TextField(blank=True, null=True)
+    change_type = models.CharField(max_length=20, choices=[
+        ('create', 'Created'),
+        ('update', 'Updated'),
+        ('delete', 'Deleted'),
+    ], default='update')
+    changed_at = models.DateTimeField(auto_now_add=True)
+    user = models.ForeignKey('users.UserProfile', on_delete=models.SET_NULL, null=True, blank=True)
+    notes = models.TextField(blank=True, null=True)  # Optional notes about the change
+
+    def __str__(self):
+        return f"{self.product.name} - {self.field_changed}: {self.old_value} -> {self.new_value} at {self.changed_at}"
+
+    class Meta:
+        ordering = ['-changed_at']

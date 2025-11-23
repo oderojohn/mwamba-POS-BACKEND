@@ -11,6 +11,7 @@ router.register(r'suppliers', views.SupplierViewSet)
 router.register(r'purchases', views.PurchaseViewSet)
 router.register(r'price-history', views.PriceHistoryViewSet)
 router.register(r'sales-history', views.SalesHistoryViewSet)
+router.register(r'product-history', views.ProductHistoryViewSet)
 router.register(r'recalls', views.ProductRecallViewSet, basename='recalls')
 
 urlpatterns = [
@@ -22,4 +23,6 @@ urlpatterns = [
     path('alerts/expiring/', views.ExpiringBatchesView.as_view()),
     path('alerts/expired/', views.ExpiredBatchesView.as_view()),
     path('analytics/profit/', views.ProfitAnalysisView.as_view()),
+    path('products/<int:product_id>/timeline/', views.ProductTimelineView.as_view(), name='product-timeline'),
+    path('reports/end-of-day-stock/', views.EndOfDayStockView.as_view(), name='end-of-day-stock'),
 ] + router.urls

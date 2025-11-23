@@ -44,35 +44,46 @@ class SaleSerializer(serializers.ModelSerializer):
             return None
 
     def get_payment_method(self, obj):
-        # Get payment method from related payment records
-        payments = obj.payment_set.all()
+        # Determine payment method based on payment records
+        payments = list(obj.payment_set.filter(status='completed'))
         if not payments:
-            # Fallback: return 'cash' to prevent N/A display
-            # This should not happen due to validation, but provides safety net
             return 'cash'
 
-        # If multiple payments, it's a split payment
-        if len(payments) > 1:
-            return 'split'
+        # Collect all payment methods from all payments, expanding split payments
+        payment_methods = set()
+        for payment in payments:
+            if payment.payment_type == 'split' and payment.split_data:
+                for method, amount in payment.split_data.items():
+                    if float(amount) > 0:
+                        payment_methods.add(method)
+            else:
+                payment_methods.add(payment.payment_type)
 
-        # Single payment
-        return payments[0].payment_type
+        # If multiple payment methods, it's a split payment
+        if len(payment_methods) > 1:
+            return 'split'
+        elif len(payment_methods) == 1:
+            return list(payment_methods)[0]
+        else:
+            return 'cash'
 
     def get_split_data(self, obj):
-        # Get split payment data from multiple payment records
-        payments = obj.payment_set.all()
-        if len(payments) <= 1:
-            return None
+        # For split payments, reconstruct split_data from payment records
+        payments = list(obj.payment_set.filter(status='completed'))
+        if len(payments) > 1:
+            split_data = {}
+            for payment in payments:
+                split_data[payment.payment_type] = float(payment.amount)
+            return split_data
 
-        # For split payments, collect amounts from cash and mpesa payments
-        split_data = {}
-        for payment in payments:
-            if payment.payment_type == 'cash':
-                split_data['cash'] = float(payment.amount)
-            elif payment.payment_type == 'mpesa':
-                split_data['mpesa'] = float(payment.amount)
-
-        return split_data if split_data else None
+        # Fallback to old logic for legacy split payments
+        split_payment = obj.payment_set.filter(payment_type='split').first()
+        if split_payment and split_payment.split_data:
+            # Only return if it's truly split (both amounts > 0)
+            split_data = {k: v for k, v in split_payment.split_data.items() if float(v) > 0}
+            if len(split_data) > 1:
+                return split_data
+        return None
 
     def get_voided_by_name(self, obj):
         try:

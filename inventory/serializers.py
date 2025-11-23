@@ -1,5 +1,5 @@
 from rest_framework import serializers
-from .models import Category, Product, Batch, StockMovement, Supplier, Purchase, PriceHistory, SalesHistory
+from .models import Category, Product, Batch, StockMovement, Supplier, Purchase, PriceHistory, SalesHistory, ProductHistory
 
 class CategorySerializer(serializers.ModelSerializer):
     class Meta:
@@ -112,4 +112,18 @@ class SalesHistorySerializer(serializers.ModelSerializer):
 
     class Meta:
         model = SalesHistory
+        fields = '__all__'
+
+class ProductHistorySerializer(serializers.ModelSerializer):
+    product_name = serializers.SerializerMethodField()
+    user_name = serializers.SerializerMethodField()
+
+    def get_product_name(self, obj):
+        return obj.product.name if obj.product else 'N/A'
+
+    def get_user_name(self, obj):
+        return obj.user.user.username if obj.user and obj.user.user else 'N/A'
+
+    class Meta:
+        model = ProductHistory
         fields = '__all__'

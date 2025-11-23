@@ -6,8 +6,11 @@ from django_filters.rest_framework import DjangoFilterBackend
 from rest_framework.filters import SearchFilter, OrderingFilter
 from django.db import models
 from django.db.models import Sum, F
-from .models import Category, Product, Batch, StockMovement, Supplier, Purchase, PriceHistory, SalesHistory
-from .serializers import CategorySerializer, ProductSerializer, BatchSerializer, StockMovementSerializer, SupplierSerializer, PurchaseSerializer, PriceHistorySerializer, SalesHistorySerializer
+from .models import Category, Product, Batch, StockMovement, Supplier, Purchase, PriceHistory, SalesHistory, ProductHistory
+from .serializers import CategorySerializer, ProductSerializer, BatchSerializer, StockMovementSerializer, SupplierSerializer, PurchaseSerializer, PriceHistorySerializer, SalesHistorySerializer, ProductHistorySerializer
+from django.db.models import Q
+from django.utils import timezone
+from datetime import datetime, date
 
 class CategoryViewSet(viewsets.ModelViewSet):
     queryset = Category.objects.all()
@@ -190,6 +193,21 @@ class SalesHistoryViewSet(viewsets.ModelViewSet):
         serializer = self.get_serializer(histories, many=True)
         return Response(serializer.data)
 
+class ProductHistoryViewSet(viewsets.ModelViewSet):
+    queryset = ProductHistory.objects.all()
+    serializer_class = ProductHistorySerializer
+    filter_backends = [DjangoFilterBackend, SearchFilter, OrderingFilter]
+    filterset_fields = ['product', 'field_changed', 'change_type', 'user']
+    search_fields = ['product__name', 'field_changed', 'notes']
+    ordering_fields = ['changed_at']
+    ordering = ['-changed_at']
+
+    @action(detail=False, methods=['get'], url_path=r'product/(?P<product_id>\d+)')
+    def by_product(self, request, product_id=None):
+        histories = self.queryset.filter(product_id=product_id)
+        serializer = self.get_serializer(histories, many=True)
+        return Response(serializer.data)
+
 # Report Views
 class StockReportView(ListAPIView):
     def get(self, request):
@@ -204,6 +222,227 @@ class StockReportView(ListAPIView):
                 'is_low_stock': product.is_low_stock,
             })
         return Response(data)
+
+# Product Timeline - Combined history view
+class ProductTimelineView(ListAPIView):
+    """
+    Get comprehensive timeline of all events for a product:
+    - Product field changes
+    - Sales history
+    - Stock movements
+    - End of day stock levels
+    """
+    def get(self, request, product_id):
+        try:
+            product = Product.objects.get(id=product_id)
+        except Product.DoesNotExist:
+            return Response({'error': 'Product not found'}, status=status.HTTP_404_NOT_FOUND)
+
+        # Get date range from query params
+        from_date = request.query_params.get('from_date')
+        to_date = request.query_params.get('to_date')
+
+        if not from_date or not to_date:
+            # Default to last 30 days
+            to_date = timezone.now().date()
+            from_date = to_date - timezone.timedelta(days=30)
+
+        # Collect all events
+        events = []
+
+        # 1. Product History (field changes)
+        product_history = ProductHistory.objects.filter(
+            product=product,
+            changed_at__date__range=[from_date, to_date]
+        ).order_by('changed_at')
+
+        for event in product_history:
+            events.append({
+                'id': f'ph_{event.id}',
+                'type': 'product_change',
+                'timestamp': event.changed_at,
+                'description': f'Product {event.field_changed} changed: {event.old_value} → {event.new_value}',
+                'details': {
+                    'field': event.field_changed,
+                    'old_value': event.old_value,
+                    'new_value': event.new_value,
+                    'change_type': event.change_type,
+                    'user': event.user.user.username if event.user and event.user.user else 'System',
+                    'notes': event.notes
+                }
+            })
+
+        # 2. Sales History
+        sales_history = SalesHistory.objects.filter(
+            product=product,
+            sale_date__date__range=[from_date, to_date]
+        ).order_by('sale_date')
+
+        for sale in sales_history:
+            events.append({
+                'id': f'sh_{sale.id}',
+                'type': 'sale',
+                'timestamp': sale.sale_date,
+                'description': f'Sold {sale.quantity} units at {sale.unit_price} each (Receipt: {sale.receipt_number})',
+                'details': {
+                    'quantity': sale.quantity,
+                    'unit_price': float(sale.unit_price),
+                    'total_price': float(sale.total_price),
+                    'customer': sale.customer.name if sale.customer else 'N/A',
+                    'receipt_number': sale.receipt_number,
+                    'batch': sale.batch.batch_number if sale.batch else 'N/A'
+                }
+            })
+
+        # 3. Stock Movements
+        stock_movements = StockMovement.objects.filter(
+            product=product,
+            created_at__date__range=[from_date, to_date]
+        ).order_by('created_at')
+
+        for movement in stock_movements:
+            events.append({
+                'id': f'sm_{movement.id}',
+                'type': 'stock_movement',
+                'timestamp': movement.created_at,
+                'description': f'Stock {movement.movement_type}: {movement.quantity} units - {movement.reason}',
+                'details': {
+                    'movement_type': movement.movement_type,
+                    'quantity': movement.quantity,
+                    'reason': movement.reason,
+                    'user': movement.user.user.username if movement.user and movement.user.user else 'System'
+                }
+            })
+
+        # Sort all events by timestamp
+        events.sort(key=lambda x: x['timestamp'], reverse=True)
+
+        # Calculate running stock levels
+        current_stock = product.stock_quantity
+        for event in reversed(events):  # Process from oldest to newest
+            if event['type'] == 'stock_movement':
+                if event['details']['movement_type'] == 'in':
+                    current_stock -= event['details']['quantity']
+                elif event['details']['movement_type'] == 'out':
+                    current_stock += event['details']['quantity']
+                elif event['details']['movement_type'] == 'adjustment':
+                    current_stock -= event['details']['quantity']
+                event['stock_after'] = current_stock
+            elif event['type'] == 'sale':
+                current_stock += event['details']['quantity']
+                event['stock_after'] = current_stock
+            else:
+                event['stock_after'] = current_stock
+
+        # Reverse back to newest first
+        events.reverse()
+
+        return Response({
+            'product': {
+                'id': product.id,
+                'name': product.name,
+                'sku': product.sku,
+                'current_stock': product.stock_quantity
+            },
+            'date_range': {
+                'from_date': from_date,
+                'to_date': to_date
+            },
+            'events': events,
+            'total_events': len(events)
+        })
+
+# End of Day Stock Report
+class EndOfDayStockView(ListAPIView):
+    """
+    Get stock levels at the end of each day for a date range
+    """
+    def get(self, request):
+        product_id = request.query_params.get('product_id')
+        from_date = request.query_params.get('from_date')
+        to_date = request.query_params.get('to_date')
+
+        if not from_date or not to_date:
+            return Response({'error': 'from_date and to_date are required'}, status=status.HTTP_400_BAD_REQUEST)
+
+        try:
+            from_date = datetime.strptime(from_date, '%Y-%m-%d').date()
+            to_date = datetime.strptime(to_date, '%Y-%m-%d').date()
+        except ValueError:
+            return Response({'error': 'Invalid date format. Use YYYY-MM-DD'}, status=status.HTTP_400_BAD_REQUEST)
+
+        # Generate date range
+        dates = []
+        current_date = from_date
+        while current_date <= to_date:
+            dates.append(current_date)
+            current_date += timezone.timedelta(days=1)
+
+        report_data = []
+
+        if product_id:
+            # Single product report
+            try:
+                product = Product.objects.get(id=product_id)
+                products = [product]
+            except Product.DoesNotExist:
+                return Response({'error': 'Product not found'}, status=status.HTTP_404_NOT_FOUND)
+        else:
+            # All products report
+            products = Product.objects.all()
+
+        for product in products:
+            product_data = {
+                'product_id': product.id,
+                'product_name': product.name,
+                'product_sku': product.sku,
+                'daily_stock': []
+            }
+
+            current_stock = product.stock_quantity
+
+            for report_date in reversed(dates):  # Work backwards from today
+                # Get all movements after this date
+                future_movements = StockMovement.objects.filter(
+                    product=product,
+                    created_at__date__gt=report_date
+                )
+
+                future_sales = SalesHistory.objects.filter(
+                    product=product,
+                    sale_date__date__gt=report_date
+                )
+
+                # Calculate stock at end of this day
+                day_end_stock = current_stock
+                for movement in future_movements:
+                    if movement.movement_type == 'in':
+                        day_end_stock -= movement.quantity
+                    elif movement.movement_type == 'out':
+                        day_end_stock += movement.quantity
+                    elif movement.movement_type == 'adjustment':
+                        day_end_stock -= movement.quantity
+
+                for sale in future_sales:
+                    day_end_stock += sale.quantity
+
+                product_data['daily_stock'].append({
+                    'date': report_date,
+                    'end_of_day_stock': max(0, day_end_stock),  # Ensure non-negative
+                    'current_stock': current_stock
+                })
+
+            product_data['daily_stock'].reverse()  # Back to chronological order
+            report_data.append(product_data)
+
+        return Response({
+            'report_type': 'end_of_day_stock',
+            'date_range': {
+                'from_date': from_date,
+                'to_date': to_date
+            },
+            'products': report_data
+        })
 
 class PurchaseReportView(ListAPIView):
     def get(self, request):

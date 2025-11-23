@@ -6,6 +6,18 @@ from django.db.models.functions import TruncDate, ExtractHour
 from django.utils import timezone
 from datetime import timedelta, datetime
 from decimal import Decimal
+from django.http import HttpResponse
+from django.conf import settings
+from django.templatetags.static import static
+import os
+from reportlab.pdfgen import canvas
+from reportlab.lib.pagesizes import letter, A4
+from reportlab.lib import colors
+from reportlab.platypus import SimpleDocTemplate, Table, TableStyle, Paragraph, Spacer, Image
+from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
+from reportlab.lib.units import inch
+from io import BytesIO
+from inventory.models import Product
 from .models import (
     Report, SalesReport, ProductSalesHistory, CustomerAnalytics,
     InventoryAnalytics, ShiftAnalytics, ProfitLossReport
@@ -327,6 +339,169 @@ class ReportViewSet(viewsets.ModelViewSet):
 class SalesSummaryView(generics.GenericAPIView):
     """Get sales summary for dashboard and reports"""
 
+    def _get_shift_sales_data(self, shift_id):
+        """Get sales data for a specific shift"""
+        from sales.models import Sale, Cart
+        from payments.models import Payment
+        from shifts.models import Shift
+
+        # Get the shift to find the cashier
+        shift = Shift.objects.get(id=shift_id)
+        cashier = shift.cashier
+
+        # Get sales for the shift (exclude voided sales for totals)
+        sales = Sale.objects.filter(
+            shift_id=shift_id,
+            voided=False
+        ).annotate(
+            date=TruncDate('sale_date')
+        ).values('date').annotate(
+            total_sales=Sum('final_amount'),
+            transaction_count=Count('id')
+        ).order_by('date')
+
+        # Get payment method breakdown for the shift
+        payments = Payment.objects.filter(
+            sale__shift_id=shift_id,
+            sale__voided=False,
+            status='completed'
+        ).select_related('sale')
+
+        payment_breakdown = {}
+        for payment in payments:
+            payment_type = payment.payment_type
+            amount = float(payment.amount)
+            if payment_type == 'split' and payment.split_data:
+                # For split payments, add amounts to respective methods
+                for method, split_amount in payment.split_data.items():
+                    payment_breakdown[method] = payment_breakdown.get(method, 0) + float(split_amount)
+            else:
+                payment_breakdown[payment_type] = payment_breakdown.get(payment_type, 0) + amount
+
+        # Get total sales and transactions for the shift
+        total_sales = sum(float(sale['total_sales']) for sale in sales)
+        total_transactions = sum(sale['transaction_count'] for sale in sales)
+
+        # Calculate actual gross profit for the shift
+        # Gross profit = sum((selling_price - cost_price) * quantity) for all items sold in shift
+        from sales.models import SaleItem
+        sales_items = SaleItem.objects.filter(
+            sale__shift_id=shift_id,
+            sale__voided=False
+        ).select_related('product')
+
+        gross_profit = 0
+        for item in sales_items:
+            if item.product and item.product.cost_price:
+                profit_per_item = (item.unit_price - item.product.cost_price) * item.quantity
+                gross_profit += float(profit_per_item)
+
+        # Calculate cost of goods sold
+        cost_of_goods_sold = sum(
+            float(item.product.cost_price * item.quantity)
+            for item in sales_items
+            if item.product and item.product.cost_price
+        )
+
+        # Net profit (estimated as gross profit minus 5% operating costs)
+        net_profit = gross_profit * 0.95
+
+        # Get all completed sales for the shift with payment info (exclude voided)
+        all_sales = Sale.objects.filter(
+            shift_id=shift_id,
+            voided=False
+        ).select_related('customer').prefetch_related('payment_set', 'saleitem_set__product').order_by('-sale_date')
+
+        # Get voided sales for the shift
+        voided_sales = Sale.objects.filter(
+            shift_id=shift_id,
+            voided=True
+        ).select_related('customer').prefetch_related('saleitem_set__product').order_by('-sale_date')
+
+        # Get held orders for the cashier (during this shift period)
+        held_orders = Cart.objects.filter(
+            cashier=cashier,
+            status='held',
+            created_at__gte=shift.start_time
+        ).select_related('customer').prefetch_related('cartitem_set__product').order_by('-created_at')
+
+        result = {
+            'total_sales': total_sales,
+            'total_transactions': total_transactions,
+            'average_sale': total_sales / total_transactions if total_transactions > 0 else 0,
+            'today_sales': total_sales,  # Since it's for the shift
+            'gross_profit': gross_profit,
+            'net_profit': net_profit,
+            'cost_of_goods_sold': cost_of_goods_sold,
+            'sales_by_payment_method': payment_breakdown,
+            'recent_sales': [
+                {
+                    'id': sale.id,
+                    'customer': sale.customer.name if sale.customer else 'Walk-in',
+                    'total_amount': float(sale.total_amount),
+                    'receipt_number': sale.receipt_number,
+                    'created_at': sale.sale_date.isoformat(),
+                    'payment_method': self._determine_payment_method(sale),
+                    'sale_type': sale.sale_type,
+                    'mpesa_number': sale.payment_set.filter(payment_type='mpesa', status='completed').first().mpesa_number if sale.payment_set.filter(payment_type='mpesa', status='completed').exists() else None,
+                    'items': [
+                        {
+                            'product_name': item.product.name,
+                            'quantity': item.quantity,
+                            'unit_price': float(item.unit_price),
+                            'total': float(item.unit_price * item.quantity)
+                        }
+                        for item in sale.saleitem_set.all()
+                    ],
+                    'split_data': self._get_split_data_for_sale(sale)
+                }
+                for sale in all_sales
+            ],
+            'voided_sales': [
+                {
+                    'id': sale.id,
+                    'customer': sale.customer.name if sale.customer else 'Walk-in',
+                    'total_amount': float(sale.total_amount),
+                    'receipt_number': sale.receipt_number,
+                    'created_at': sale.sale_date.isoformat(),
+                    'void_reason': sale.void_reason,
+                    'voided_at': sale.voided_at.isoformat() if sale.voided_at else None,
+                    'items': [
+                        {
+                            'product_name': item.product.name,
+                            'quantity': item.quantity,
+                            'unit_price': float(item.unit_price),
+                            'total': float(item.unit_price * item.quantity)
+                        }
+                        for item in sale.saleitem_set.all()
+                    ]
+                }
+                for sale in voided_sales
+            ],
+            'held_orders': [
+                {
+                    'id': cart.id,
+                    'customer': cart.customer.name if cart.customer else 'Walk-in',
+                    'total_amount': float(sum(item.unit_price * item.quantity for item in cart.cartitem_set.all())),
+                    'created_at': cart.created_at.isoformat(),
+                    'status': cart.status,
+                    'void_reason': cart.void_reason,
+                    'items': [
+                        {
+                            'product_name': item.product.name,
+                            'quantity': item.quantity,
+                            'unit_price': float(item.unit_price),
+                            'total': float(item.unit_price * item.quantity)
+                        }
+                        for item in cart.cartitem_set.all()
+                    ]
+                }
+                for cart in held_orders
+            ]
+        }
+
+        return result
+
     def get(self, request, sale_id=None):
         # Check if this is a request for a specific sale chit
         if sale_id:
@@ -468,6 +643,49 @@ class SalesSummaryView(generics.GenericAPIView):
             serializer = SalesSummarySerializer(data)
             return Response(serializer.data)
 
+    def _determine_payment_method(self, sale):
+        """Determine payment method based on payment records"""
+        payments = list(sale.payment_set.filter(status='completed'))
+        if not payments:
+            return 'N/A'
+
+        # Collect all payment methods from all payments, expanding split payments
+        payment_methods = set()
+        for payment in payments:
+            if payment.payment_type == 'MPESA' and payment.split_data:
+                for method, amount in payment.split_data.items():
+                    if float(amount) > 0:
+                        payment_methods.add(method)
+            else:
+                payment_methods.add(payment.payment_type)
+
+        # If multiple payment methods, it's a split payment
+        if len(payment_methods) > 1:
+            return 'split'
+        elif len(payment_methods) == 1:
+            return list(payment_methods)[0]
+        else:
+            return 'cash'
+
+    def _get_split_data_for_sale(self, sale):
+        """Get split data for a sale, reconstructing from payment records if needed"""
+        # For split payments, reconstruct split_data from payment records
+        payments = list(sale.payment_set.filter(status='completed'))
+        if len(payments) > 1:
+            split_data = {}
+            for payment in payments:
+                split_data[payment.payment_type] = float(payment.amount)
+            return split_data
+
+        # Fallback to old logic for legacy split payments
+        split_payment = sale.payment_set.filter(payment_type='split').first()
+        if split_payment and split_payment.split_data:
+            # Only return if it's truly split (both amounts > 0)
+            split_data = {k: v for k, v in split_payment.split_data.items() if float(v) > 0}
+            if len(split_data) > 1:
+                return split_data
+        return None
+
     def _get_today_sales(self):
         from sales.models import Sale
         today = timezone.now().date()
@@ -510,19 +728,30 @@ class SalesSummaryView(generics.GenericAPIView):
         payments = Payment.objects.filter(
             created_at__date=date,
             status='completed'
-        ).values('payment_type').annotate(
-            amount=Sum('amount')
-        ).order_by('-amount')
+        )
 
-        total_amount = sum(float(p['amount']) for p in payments)
+        payment_totals = {}
+        total_amount = 0
+        for payment in payments:
+            payment_type = payment.payment_type
+            amount = float(payment.amount)
+            if payment_type == 'split' and payment.split_data:
+                # For split payments, add amounts to respective methods
+                for method, split_amount in payment.split_data.items():
+                    split_amt = float(split_amount)
+                    payment_totals[method] = payment_totals.get(method, 0) + split_amt
+                    total_amount += split_amt
+            else:
+                payment_totals[payment_type] = payment_totals.get(payment_type, 0) + amount
+                total_amount += amount
 
         return [
             {
-                'method': payment['payment_type'],
-                'amount': float(payment['amount']),
-                'percentage': (float(payment['amount']) / total_amount * 100) if total_amount > 0 else 0
+                'method': method,
+                'amount': amount,
+                'percentage': (amount / total_amount * 100) if total_amount > 0 else 0
             }
-            for payment in payments
+            for method, amount in payment_totals.items()
         ]
 
     def _get_top_products(self, start_date, end_date):
@@ -709,180 +938,252 @@ class SalesSummaryView(generics.GenericAPIView):
 
         return result
 
-    def _get_shift_sales_data(self, shift_id):
-        """Get sales data for a specific shift"""
-        from sales.models import Sale, Cart
-        from payments.models import Payment
-        from shifts.models import Shift
+class ProductPriceListPDFView(generics.GenericAPIView):
+    """Generate professional Excel-like PDF with product price lists organized by category"""
 
-        # Get the shift to find the cashier
-        shift = Shift.objects.get(id=shift_id)
-        cashier = shift.cashier
+    def get(self, request):
+        # Get price type from query parameters
+        price_type = request.query_params.get('price_type', 'both')
 
-        # Get sales for the shift (exclude voided sales for totals)
-        sales = Sale.objects.filter(
-            shift_id=shift_id,
-            voided=False
-        ).annotate(
-            date=TruncDate('sale_date')
-        ).values('date').annotate(
-            total_sales=Sum('total_amount'),
-            transaction_count=Count('id')
-        ).order_by('date')
+        # Validate price_type
+        if price_type not in ['retail', 'wholesale', 'both']:
+            return Response({'error': 'Invalid price_type. Must be retail, wholesale, or both'}, status=status.HTTP_400_BAD_REQUEST)
 
-        # Get payment method breakdown for the shift, including split payment details
-        payments = Payment.objects.filter(
-            sale__shift_id=shift_id,
-            sale__voided=False,
-            status='completed'
-        ).values('payment_type').annotate(
-            amount=Sum('amount')
+        # Get all active products with categories, ordered by category then name
+        products = Product.objects.filter(is_active=True).select_related('category').order_by('category__name', 'name')
+
+        # Group products by category
+        from collections import defaultdict
+        products_by_category = defaultdict(list)
+
+        for product in products:
+            category_name = product.category.name if product.category else 'Uncategorized'
+            products_by_category[category_name].append(product)
+
+        # Create PDF buffer
+        buffer = BytesIO()
+        doc = SimpleDocTemplate(buffer, pagesize=A4, leftMargin=30, rightMargin=30, topMargin=20, bottomMargin=30)
+        elements = []
+
+        # Styles
+        styles = getSampleStyleSheet()
+
+        # Company Header Styles
+        company_name_style = ParagraphStyle(
+            'CompanyName',
+            parent=styles['Heading1'],
+            fontSize=18,
+            spaceAfter=5,
+            alignment=1,
+            textColor=colors.HexColor('#2c3e50'),
+            fontName='Helvetica-Bold'
         )
 
-        # For split payments, extract the split data
-        split_payments = Payment.objects.filter(
-            sale__shift_id=shift_id,
-            sale__voided=False,
-            status='completed',
-            payment_type='split'
+        receipt_style = ParagraphStyle(
+            'ReceiptStyle',
+            parent=styles['Heading2'],
+            fontSize=14,
+            spaceAfter=5,
+            alignment=1,
+            textColor=colors.HexColor('#e74c3c'),
+            fontName='Helvetica-Bold'
         )
 
-        split_breakdown = {}
-        for payment in split_payments:
-            if payment.split_data:
-                for method, amount in payment.split_data.items():
-                    split_breakdown[method] = split_breakdown.get(method, 0) + float(amount)
-
-        payment_breakdown = {}
-        for payment in payments:
-            payment_breakdown[payment['payment_type']] = float(payment['amount'])
-
-        # Add split payment breakdown to the main breakdown
-        for method, amount in split_breakdown.items():
-            payment_breakdown[method] = payment_breakdown.get(method, 0) + amount
-
-        # Get total sales and transactions for the shift
-        total_sales = sum(float(sale['total_sales']) for sale in sales)
-        total_transactions = sum(sale['transaction_count'] for sale in sales)
-
-        # Calculate actual gross profit for the shift
-        # Gross profit = sum((selling_price - cost_price) * quantity) for all items sold in shift
-        from sales.models import SaleItem
-        sales_items = SaleItem.objects.filter(
-            sale__shift_id=shift_id,
-            sale__voided=False
-        ).select_related('product')
-
-        gross_profit = 0
-        for item in sales_items:
-            if item.product and item.product.cost_price:
-                profit_per_item = (item.unit_price - item.product.cost_price) * item.quantity
-                gross_profit += float(profit_per_item)
-
-        # Calculate cost of goods sold
-        cost_of_goods_sold = sum(
-            float(item.product.cost_price * item.quantity)
-            for item in sales_items
-            if item.product and item.product.cost_price
+        business_info_style = ParagraphStyle(
+            'BusinessInfo',
+            parent=styles['Normal'],
+            fontSize=12,
+            alignment=1,
+            textColor=colors.HexColor('#34495e'),
+            fontName='Helvetica-Bold'
         )
 
-        # Net profit (estimated as gross profit minus 5% operating costs)
-        net_profit = gross_profit * 0.95
+        contact_style = ParagraphStyle(
+            'ContactStyle',
+            parent=styles['Normal'],
+            fontSize=10,
+            alignment=1,
+            textColor=colors.HexColor('#7f8c8d')
+        )
 
-        # Get all completed sales for the shift with payment info (exclude voided)
-        all_sales = Sale.objects.filter(
-            shift_id=shift_id,
-            voided=False
-        ).select_related('customer').prefetch_related('payment_set', 'saleitem_set__product').order_by('-sale_date')
+        # Company Header - Keep logo only
+        try:
+            # Try to load logo from staticfiles directory
+            logo_path = os.path.join(settings.BASE_DIR, 'staticfiles', 'images', 'logo.png')
+            if os.path.exists(logo_path):
+                logo = Image(logo_path, width=60, height=60)
+                logo.hAlign = 'CENTER'
+                elements.append(logo)
+                elements.append(Spacer(1, 10))
+        except Exception as e:
+            print(f"Logo loading error: {e}")
+            pass  # Logo not found, continue without it
 
-        # Get voided sales for the shift
-        voided_sales = Sale.objects.filter(
-            shift_id=shift_id,
-            voided=True
-        ).select_related('customer').prefetch_related('saleitem_set__product').order_by('-sale_date')
+        # Company information - Removed as requested
+        # elements.append(Paragraph("MWAMBA", company_name_style))
+        # elements.append(Paragraph("RECEIPT", receipt_style))
+        # elements.append(Paragraph("MWAMBA LIQUOR STORES", business_info_style))
+        # elements.append(Paragraph("RONGO", business_info_style))
+        # elements.append(Spacer(1, 5))
+        # elements.append(Paragraph("Tel: +254 745 119 135", contact_style))
+        # elements.append(Paragraph("Paybill: 522533", contact_style))
+        # elements.append(Paragraph("Account: 8015580", contact_style))
 
-        # Get held orders for the cashier (during this shift period)
-        held_orders = Cart.objects.filter(
-            cashier=cashier,
-            status='held',
-            created_at__gte=shift.start_time
-        ).select_related('customer').prefetch_related('cartitem_set__product').order_by('-created_at')
+        elements.append(Spacer(1, 20))
 
-        result = {
-            'total_sales': total_sales,
-            'total_transactions': total_transactions,
-            'average_sale': total_sales / total_transactions if total_transactions > 0 else 0,
-            'today_sales': total_sales,  # Since it's for the shift
-            'gross_profit': gross_profit,
-            'net_profit': net_profit,
-            'cost_of_goods_sold': cost_of_goods_sold,
-            'sales_by_payment_method': payment_breakdown,
-            'recent_sales': [
-                {
-                    'id': sale.id,
-                    'customer': sale.customer.name if sale.customer else 'Walk-in',
-                    'total_amount': float(sale.total_amount),
-                    'receipt_number': sale.receipt_number,
-                    'created_at': sale.sale_date.isoformat(),
-                    'payment_method': sale.payment_set.first().payment_type if sale.payment_set.exists() else 'cash',
-                    'sale_type': sale.sale_type,
-                    'items': [
-                        {
-                            'product_name': item.product.name,
-                            'quantity': item.quantity,
-                            'unit_price': float(item.unit_price),
-                            'total': float(item.unit_price * item.quantity)
-                        }
-                        for item in sale.saleitem_set.all()
-                    ],
-                    'split_data': sale.payment_set.filter(payment_type='split').first().split_data if sale.payment_set.filter(payment_type='split').exists() and sale.payment_set.filter(payment_type='split').first().split_data else None
-                }
-                for sale in all_sales
-            ],
-            'voided_sales': [
-                {
-                    'id': sale.id,
-                    'customer': sale.customer.name if sale.customer else 'Walk-in',
-                    'total_amount': float(sale.total_amount),
-                    'receipt_number': sale.receipt_number,
-                    'created_at': sale.sale_date.isoformat(),
-                    'void_reason': sale.void_reason,
-                    'voided_at': sale.voided_at.isoformat() if sale.voided_at else None,
-                    'items': [
-                        {
-                            'product_name': item.product.name,
-                            'quantity': item.quantity,
-                            'unit_price': float(item.unit_price),
-                            'total': float(item.unit_price * item.quantity)
-                        }
-                        for item in sale.saleitem_set.all()
-                    ]
-                }
-                for sale in voided_sales
-            ],
-            'held_orders': [
-                {
-                    'id': cart.id,
-                    'customer': cart.customer.name if cart.customer else 'Walk-in',
-                    'total_amount': float(sum(item.unit_price * item.quantity for item in cart.cartitem_set.all())),
-                    'created_at': cart.created_at.isoformat(),
-                    'status': cart.status,
-                    'void_reason': cart.void_reason,
-                    'items': [
-                        {
-                            'product_name': item.product.name,
-                            'quantity': item.quantity,
-                            'unit_price': float(item.unit_price),
-                            'total': float(item.unit_price * item.quantity)
-                        }
-                        for item in cart.cartitem_set.all()
-                    ]
-                }
-                for cart in held_orders
-            ]
-        }
+        # Document title
+        title_style = ParagraphStyle(
+            'DocumentTitle',
+            parent=styles['Heading1'],
+            fontSize=16,
+            spaceAfter=15,
+            alignment=1,
+            textColor=colors.HexColor('#2c3e50'),
+            fontName='Helvetica-Bold'
+        )
+        elements.append(Paragraph("PRODUCT PRICE LIST", title_style))
 
-        return result
+        # Date and summary
+        date_style = ParagraphStyle(
+            'DateStyle',
+            parent=styles['Normal'],
+            fontSize=9,
+            spaceAfter=20,
+            alignment=1,
+            textColor=colors.HexColor('#7f8c8d')
+        )
+        total_products = products.count()
+        total_categories = len(products_by_category)
+        summary_text = f"Generated on: {timezone.now().strftime('%Y-%m-%d %H:%M:%S')} | Total Products: {total_products} | Categories: {total_categories}"
+        elements.append(Paragraph(summary_text, date_style))
+
+        # Prepare comprehensive table data (Excel-like)
+        table_data = []
+
+        # Header row
+        header_row = ['Category', 'Product Name', 'SKU']
+        if price_type in ['retail', 'both']:
+            header_row.append('Retail Price')
+        if price_type in ['wholesale', 'both']:
+            header_row.append('Wholesale Price')
+        table_data.append(header_row)
+
+        # Add data rows grouped by category
+        current_category = None
+        for category_name, category_products in sorted(products_by_category.items()):
+            # Add category separator row (merged cells)
+            if current_category is not None:
+                # Add empty row for spacing
+                empty_row = [''] * len(header_row)
+                table_data.append(empty_row)
+
+            # Add category header row
+            category_header = [f'CATEGORY: {category_name.upper()}'] + [''] * (len(header_row) - 1)
+            table_data.append(category_header)
+
+            # Add product rows for this category
+            for product in category_products:
+                row = [
+                    '',  # Empty category column for products
+                    product.name,
+                    product.sku or 'N/A'
+                ]
+
+                if price_type in ['retail', 'both']:
+                    row.append(f"Ksh {product.selling_price:.2f}" if product.selling_price else 'N/A')
+                if price_type in ['wholesale', 'both']:
+                    row.append(f"Ksh {product.wholesale_price:.2f}" if product.wholesale_price else 'N/A')
+
+                table_data.append(row)
+
+            current_category = category_name
+
+        # Create the comprehensive table
+        table = Table(table_data, colWidths=[70, 130, 130] + ([70] * (len(header_row) - 3)))
+
+        # Table style - Excel-like
+        table_style = TableStyle([
+            # Header styling
+            ('BACKGROUND', (0, 0), (-1, 0), colors.HexColor('#34495e')),
+            ('TEXTCOLOR', (0, 0), (-1, 0), colors.white),
+            ('ALIGN', (0, 0), (-1, 0), 'CENTER'),
+            ('FONTNAME', (0, 0), (-1, 0), 'Helvetica-Bold'),
+            ('FONTSIZE', (0, 0), (-1, 0), 10),
+            ('BOTTOMPADDING', (0, 0), (-1, 0), 8),
+            ('TOPPADDING', (0, 0), (-1, 0), 8),
+
+            # Category header rows
+            ('BACKGROUND', (0, 1), (-1, -1), colors.HexColor('#ecf0f1')),
+            ('TEXTCOLOR', (0, 1), (-1, -1), colors.HexColor('#2c3e50')),
+            ('FONTNAME', (0, 1), (-1, -1), 'Helvetica-Bold'),
+            ('FONTSIZE', (0, 1), (-1, -1), 9),
+            ('ALIGN', (0, 1), (-1, -1), 'LEFT'),
+            ('SPAN', (0, 1), (-1, 1)),  # Merge category header cells
+
+            # Data rows
+            ('FONTNAME', (0, 2), (-1, -1), 'Helvetica'),
+            ('FONTSIZE', (0, 2), (-1, -1), 8),
+            ('ALIGN', (0, 2), (-1, -1), 'LEFT'),
+            ('ALIGN', (3, 2), (-1, -1), 'RIGHT'),  # Right align price columns
+
+            # Grid lines
+            ('GRID', (0, 0), (-1, -1), 0.5, colors.HexColor('#bdc3c7')),
+
+            # Alternating row colors for data
+            ('BACKGROUND', (0, 3), (-1, 3), colors.HexColor('#f8f9fa')),
+            ('BACKGROUND', (0, 5), (-1, 5), colors.HexColor('#f8f9fa')),
+        ])
+
+        # Apply alternating colors for all data rows
+        row_idx = 2  # Start after header and first category
+        while row_idx < len(table_data):
+            if table_data[row_idx][0] == '':  # Data row (not category header)
+                if (row_idx - 2) % 2 == 1:  # Alternate starting from row 3
+                    table_style.add('BACKGROUND', (0, row_idx), (-1, row_idx), colors.HexColor('#f8f9fa'))
+            row_idx += 1
+
+        # Special styling for category headers
+        category_rows = []
+        for i, row in enumerate(table_data):
+            if len(row) > 0 and str(row[0]).startswith('CATEGORY:'):
+                category_rows.append(i)
+
+        for row_idx in category_rows:
+            table_style.add('BACKGROUND', (0, row_idx), (-1, row_idx), colors.HexColor('#95a5a6'))
+            table_style.add('TEXTCOLOR', (0, row_idx), (-1, row_idx), colors.white)
+            table_style.add('FONTNAME', (0, row_idx), (-1, row_idx), 'Helvetica-Bold')
+            table_style.add('FONTSIZE', (0, row_idx), (-1, row_idx), 9)
+
+        table.setStyle(table_style)
+
+        # Add table to elements
+        elements.append(table)
+
+        # Footer - Removed as requested
+        # footer_style = ParagraphStyle(
+        #     'FooterStyle',
+        #     parent=styles['Normal'],
+        #     fontSize=8,
+        #     spaceBefore=15,
+        #     alignment=1,
+        #     textColor=colors.HexColor('#95a5a6')
+        # )
+        # footer_text = "Thank you for your business | MWAMBA LIQUOR STORES"
+        # elements.append(Paragraph(footer_text, footer_style))
+
+        # Build PDF
+        doc.build(elements)
+
+        # Get PDF data
+        pdf_data = buffer.getvalue()
+        buffer.close()
+
+        # Create response
+        response = HttpResponse(pdf_data, content_type='application/pdf')
+        filename = f"product_price_list_{price_type}_{timezone.now().strftime('%Y%m%d_%H%M%S')}.pdf"
+        response['Content-Disposition'] = f'attachment; filename="{filename}"'
+
+        return response
 
     def _get_today_all_sales(self, date):
         """Get all sales data for today"""
@@ -906,27 +1207,18 @@ class SalesSummaryView(generics.GenericAPIView):
             sale__sale_date__date=date,
             sale__voided=False,
             status='completed'
-        ).values('payment_type').annotate(
-            amount=Sum('amount')
-        )
-
-        # For split payments, extract the split data
-        split_payments = Payment.objects.filter(
-            sale__sale_date__date=date,
-            sale__voided=False,
-            status='completed',
-            payment_type='split'
-        )
-
-        split_breakdown = {}
-        for payment in split_payments:
-            if payment.split_data:
-                for method, amount in payment.split_data.items():
-                    split_breakdown[method] = split_breakdown.get(method, 0) + float(amount)
+        ).select_related('sale')
 
         payment_breakdown = {}
         for payment in payments:
-            payment_breakdown[payment['payment_type']] = float(payment['amount'])
+            payment_type = payment.payment_type
+            amount = float(payment.amount)
+            if payment_type == 'split' and payment.split_data:
+                # For split payments, add amounts to respective methods
+                for method, split_amount in payment.split_data.items():
+                    payment_breakdown[method] = payment_breakdown.get(method, 0) + float(split_amount)
+            else:
+                payment_breakdown[payment_type] = payment_breakdown.get(payment_type, 0) + amount
 
         # Get total sales and transactions for today
         total_sales = sum(float(sale['total_sales']) for sale in sales)
@@ -977,7 +1269,7 @@ class SalesSummaryView(generics.GenericAPIView):
                     'total_amount': float(sale.final_amount),
                     'receipt_number': sale.receipt_number,
                     'created_at': sale.sale_date.isoformat(),
-                    'payment_method': sale.payment_set.first().payment_type if sale.payment_set.exists() else 'cash',
+                    'payment_method': self._determine_payment_method(sale),
                     'sale_type': sale.sale_type,
                     'items': [
                         {
@@ -1567,6 +1859,7 @@ class ShiftSummaryView(generics.GenericAPIView):
 
             # Get payment details
             payments = []
+            payment_breakdown = {}
             for payment in sale.payment_set.filter(status='completed'):
                 payments.append({
                     'id': payment.id,
@@ -1576,6 +1869,8 @@ class ShiftSummaryView(generics.GenericAPIView):
                     'created_at': payment.created_at.isoformat(),
                     'status': payment.status
                 })
+                # Aggregate payment amounts by type
+                payment_breakdown[payment.payment_type] = payment_breakdown.get(payment.payment_type, 0) + float(payment.amount)
 
             # Calculate totals
             subtotal = sum(item['line_total'] for item in items)
@@ -1605,6 +1900,7 @@ class ShiftSummaryView(generics.GenericAPIView):
                 } if sale.shift else None,
                 'items': items,
                 'payments': payments,
+                'payment_breakdown': payment_breakdown,
                 'summary': {
                     'item_count': len(items),
                     'total_quantity': sum(item['quantity'] for item in items),

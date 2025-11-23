@@ -11,6 +11,10 @@ def create_default_payment(sender, instance, created, **kwargs):
     preventing 'N/A' from appearing in payment method displays.
     Only runs for newly created sales.
     """
+    # Skip if flagged to skip default payment creation
+    if hasattr(instance, '_skip_default_payment') and instance._skip_default_payment:
+        return
+
     if created and not instance.voided and not instance.payment_set.exists():
         # Create a default cash payment for the sale
         Payment.objects.create(
