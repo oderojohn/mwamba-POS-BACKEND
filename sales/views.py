@@ -156,6 +156,13 @@ class SaleViewSet(viewsets.ModelViewSet):
                     product = cart_item.product
                     requested_quantity = int(cart_item.quantity)
 
+                    # Validate quantity is positive
+                    if requested_quantity <= 0:
+                        return Response(
+                            {'error': f'Invalid quantity for product "{product.name}". Quantity must be positive.'},
+                            status=status.HTTP_400_BAD_REQUEST
+                        )
+
                     if float(product.stock_quantity) < requested_quantity:
                         return Response(
                             {'error': f'Insufficient stock for product "{product.name}". Available: {product.stock_quantity}, Requested: {requested_quantity}'},
@@ -476,6 +483,13 @@ class SaleViewSet(viewsets.ModelViewSet):
                     product = sale_item.product
                     quantity_to_restore = sale_item.quantity
 
+                    # Validate quantity is positive
+                    if quantity_to_restore <= 0:
+                        return Response(
+                            {'error': f'Invalid quantity for product "{product.name}" in voided sale. Quantity must be positive.'},
+                            status=status.HTTP_400_BAD_REQUEST
+                        )
+
                     # Restore product stock
                     from decimal import Decimal
                     product.stock_quantity = Decimal(str(product.stock_quantity)) + Decimal(str(quantity_to_restore))
@@ -624,6 +638,14 @@ class SaleViewSet(viewsets.ModelViewSet):
                 for cart_item in cart_items:
                     product = cart_item.product
                     requested_quantity = int(cart_item.quantity)
+
+                    # Validate quantity is positive
+                    if requested_quantity <= 0:
+                        return Response(
+                            {'error': f'Invalid quantity for product "{product.name}". Quantity must be positive.'},
+                            status=status.HTTP_400_BAD_REQUEST
+                        )
+
                     total_quantity += requested_quantity
 
                     if float(product.stock_quantity) < requested_quantity:

@@ -74,15 +74,9 @@ class Product(models.Model):
             new_value = getattr(self, field)
 
             if old_value != new_value:
-                # Get current user if available
-                user = None
-                try:
-                    from django.utils.deprecation import MiddlewareMixin
-                    from django.contrib.auth.middleware import get_user
-                    # This is a simplified way; in practice, you'd need request context
-                    user = None  # TODO: Implement proper user tracking
-                except:
-                    pass
+                # Get current user from middleware
+                from branches.middleware import BranchContextMiddleware
+                user = BranchContextMiddleware.get_current_user()
 
                 ProductHistory.objects.create(
                     product=self,
@@ -90,7 +84,7 @@ class Product(models.Model):
                     old_value=str(old_value) if old_value is not None else '',
                     new_value=str(new_value) if new_value is not None else '',
                     change_type='update',
-                    user=user,
+                    user=user.userprofile if user else None,
                     notes=f'Updated {field}'
                 )
 

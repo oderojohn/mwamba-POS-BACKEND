@@ -6,6 +6,7 @@ Ensures ONLY saved Branch instances are ever injected into filters.
 from threading import local
 
 _branch_context = local()
+_user_context = local()
 
 
 class BranchContextMiddleware:
@@ -16,6 +17,11 @@ class BranchContextMiddleware:
     def __call__(self, request):
 
         try:
+            # Set current user
+            if hasattr(request, "user") and request.user.is_authenticated:
+                self._set_user(request.user)
+                print(f"[USER] Set current user: {request.user.username}")
+
             # -------------------------------------------------------------
             # 1. Try getting branch from JWT (SimpleJWT)
             # -------------------------------------------------------------
@@ -86,6 +92,7 @@ class BranchContextMiddleware:
 
         # Cleanup per-request
         self._clear_branch()
+        self._clear_user()
 
         return response
 
@@ -115,3 +122,16 @@ class BranchContextMiddleware:
     def _clear_branch(cls):
         if hasattr(_branch_context, "branch"):
             delattr(_branch_context, "branch")
+
+    @classmethod
+    def get_current_user(cls):
+        return getattr(_user_context, "user", None)
+
+    @classmethod
+    def _set_user(cls, user):
+        _user_context.user = user
+
+    @classmethod
+    def _clear_user(cls):
+        if hasattr(_user_context, "user"):
+            delattr(_user_context, "user")
