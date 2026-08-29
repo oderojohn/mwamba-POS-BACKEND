@@ -2,12 +2,14 @@ from rest_framework import viewsets, generics, status
 from rest_framework.response import Response
 from django_filters.rest_framework import DjangoFilterBackend
 from rest_framework.filters import SearchFilter, OrderingFilter
+from myshop.pagination import StandardResultsPagination
 from .models import Customer, LoyaltyTransaction
 from .serializers import CustomerSerializer, LoyaltyTransactionSerializer
 
 class CustomerViewSet(viewsets.ModelViewSet):
     queryset = Customer.objects.all()
     serializer_class = CustomerSerializer
+    pagination_class = StandardResultsPagination
     filter_backends = [DjangoFilterBackend, SearchFilter, OrderingFilter]
     filterset_fields = ['customer_type', 'is_active']
     search_fields = ['name', 'phone', 'email', 'business_name']
@@ -16,7 +18,7 @@ class CustomerViewSet(viewsets.ModelViewSet):
 
     def get_queryset(self):
         queryset = Customer.objects.all()
-        mode = self.request.query_params.get('mode', 'retail')
+        mode = self.request.query_params.get('mode')
 
         if mode == 'wholesale':
             # In wholesale mode, show only wholesale customers
@@ -24,6 +26,8 @@ class CustomerViewSet(viewsets.ModelViewSet):
         elif mode == 'retail':
             # In retail mode, show only retail customers
             queryset = queryset.filter(customer_type='retail')
+        # No mode specified: return all customer types (further narrowed by
+        # the customer_type filter/search params below if provided)
 
         return queryset
 

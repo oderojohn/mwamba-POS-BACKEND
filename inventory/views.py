@@ -93,8 +93,9 @@ class ProductViewSet(viewsets.ModelViewSet):
         })
 
 class BatchViewSet(viewsets.ModelViewSet):
-    queryset = Batch.objects.all()
+    queryset = Batch.objects.select_related('product', 'supplier')
     serializer_class = BatchSerializer
+    pagination_class = ProductPagination
     filter_backends = [DjangoFilterBackend, SearchFilter, OrderingFilter]
     filterset_fields = ['product', 'supplier', 'status']
     search_fields = ['batch_number', 'product__name']

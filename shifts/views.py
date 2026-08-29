@@ -1,6 +1,6 @@
 from rest_framework import viewsets, generics, status, serializers
 from rest_framework.response import Response
-from rest_framework.pagination import PageNumberPagination
+from myshop.pagination import StandardResultsPagination
 from django.utils import timezone
 from django_filters.rest_framework import DjangoFilterBackend
 from rest_framework.filters import SearchFilter, OrderingFilter
@@ -16,7 +16,7 @@ class ShiftViewSet(viewsets.ModelViewSet):
         Prefetch('sale_set', queryset=Sale.objects.select_related('customer'))
     ).select_related('cashier', 'cashier__user', 'approved_by')
     serializer_class = ShiftSerializer
-    pagination_class = PageNumberPagination
+    pagination_class = StandardResultsPagination
     filter_backends = [DjangoFilterBackend, SearchFilter, OrderingFilter]
     filterset_fields = ['cashier', 'status', 'start_time', 'end_time']
     search_fields = ['cashier__user__username', 'cashier__user__first_name', 'cashier__user__last_name']
@@ -393,7 +393,7 @@ class AllShiftsView(generics.ListAPIView):
     """Get all shifts with optional filtering"""
     serializer_class = ShiftSerializer
     permission_classes = []
-    pagination_class = PageNumberPagination
+    pagination_class = StandardResultsPagination
     
     def get_queryset(self):
         queryset = Shift.objects.prefetch_related(

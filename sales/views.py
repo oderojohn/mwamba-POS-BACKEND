@@ -1,13 +1,13 @@
 from rest_framework import viewsets, status, serializers
 from rest_framework.response import Response
 from rest_framework.decorators import action
-from rest_framework.pagination import PageNumberPagination
+from myshop.pagination import StandardResultsPagination
 from django_filters.rest_framework import DjangoFilterBackend
 from rest_framework.filters import SearchFilter, OrderingFilter
 from django.utils import timezone
 from django.db import transaction
 from django.conf import settings
-from django.db.models import Q
+from django.db.models import Q, Prefetch
 from .models import Cart, CartItem, Sale, SaleItem, Return, ReturnItem, Invoice, InvoiceItem, AuditLog
 from chits.models import Chit
 from .serializers import CartSerializer, CartItemSerializer, SaleSerializer, SaleItemSerializer, ReturnSerializer, InvoiceSerializer, InvoiceItemSerializer, AuditLogSerializer
@@ -26,9 +26,13 @@ class CartItemViewSet(viewsets.ModelViewSet):
     serializer_class = CartItemSerializer
 
 class SaleViewSet(viewsets.ModelViewSet):
-    queryset = Sale.objects.prefetch_related('saleitem_set').all()
+    queryset = Sale.objects.select_related(
+        'customer', 'voided_by__user', 'edited_by__user'
+    ).prefetch_related(
+        Prefetch('saleitem_set', queryset=SaleItem.objects.select_related('product'))
+    ).all()
     serializer_class = SaleSerializer
-    pagination_class = PageNumberPagination
+    pagination_class = StandardResultsPagination
     filter_backends = [DjangoFilterBackend, SearchFilter, OrderingFilter]
     filterset_fields = ['receipt_number', 'sale_type', 'voided', 'customer', 'shift']
     search_fields = ['receipt_number', 'customer__name', 'customer__phone']
@@ -1725,16 +1729,16 @@ class SaleItemViewSet(viewsets.ModelViewSet):
     serializer_class = SaleItemSerializer
 
 class ReturnViewSet(viewsets.ModelViewSet):
-    queryset = Return.objects.all()
+    queryset = Return.objects.select_related('sale', 'processed_by__user').prefetch_related(
+        Prefetch('items', queryset=ReturnItem.objects.select_related('sale_item__product')),
+        'exchange_items',
+    )
     serializer_class = ReturnSerializer
     filter_backends = [DjangoFilterBackend, SearchFilter, OrderingFilter]
     filterset_fields = ['shift']
     ordering_fields = ['-return_date', 'return_date', 'total_refund_amount']
     ordering = ['-return_date']
-    pagination_class = PageNumberPagination
-    page_size = 100
-    page_size_query_param = 'page_size'
-    max_page_size = 1000
+    pagination_class = StandardResultsPagination
 
     def get_queryset(self):
         """Prefetch related objects for better performance"""
@@ -1997,8 +2001,9 @@ Use this code for future refunds
             )
 
 class InvoiceViewSet(viewsets.ModelViewSet):
-    queryset = Invoice.objects.all()
+    queryset = Invoice.objects.select_related('customer', 'sale', 'created_by__user').prefetch_related('items')
     serializer_class = InvoiceSerializer
+    pagination_class = StandardResultsPagination
     filter_backends = [DjangoFilterBackend, SearchFilter, OrderingFilter]
     filterset_fields = ['customer', 'status', 'sale']
     search_fields = ['invoice_number', 'customer__name', 'notes']
@@ -2089,8 +2094,9 @@ class InvoiceItemViewSet(viewsets.ModelViewSet):
 
 class AuditLogViewSet(viewsets.ReadOnlyModelViewSet):
     """Read-only viewset for audit logs (admin/manager only)"""
-    queryset = AuditLog.objects.all()
+    queryset = AuditLog.objects.select_related('user__user')
     serializer_class = AuditLogSerializer
+    pagination_class = StandardResultsPagination
     filter_backends = [DjangoFilterBackend, SearchFilter, OrderingFilter]
     filterset_fields = ['operation', 'user', 'entity_type']
     search_fields = ['description', 'user__user__username']

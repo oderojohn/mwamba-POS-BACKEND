@@ -3,12 +3,14 @@ from rest_framework.decorators import action
 from rest_framework.response import Response
 from django_filters.rest_framework import DjangoFilterBackend
 from rest_framework.filters import SearchFilter, OrderingFilter
+from myshop.pagination import StandardResultsPagination
 from .models import Supplier, SupplierPriceHistory, PurchaseOrder, PurchaseOrderItem
 from .serializers import SupplierSerializer, SupplierPriceHistorySerializer, PurchaseOrderSerializer, PurchaseOrderItemSerializer
 
 class SupplierViewSet(viewsets.ModelViewSet):
     queryset = Supplier.objects.all()
     serializer_class = SupplierSerializer
+    pagination_class = StandardResultsPagination
     filter_backends = [SearchFilter, OrderingFilter]
     search_fields = ['name', 'contact_person', 'phone', 'email']
     ordering_fields = ['name']
@@ -24,8 +26,11 @@ class SupplierPriceHistoryViewSet(viewsets.ModelViewSet):
     ordering = ['-date']
 
 class PurchaseOrderViewSet(viewsets.ModelViewSet):
-    queryset = PurchaseOrder.objects.all().order_by('-created_at')
+    queryset = PurchaseOrder.objects.select_related('supplier').prefetch_related(
+        'items', 'items__product'
+    ).order_by('-created_at')
     serializer_class = PurchaseOrderSerializer
+    pagination_class = StandardResultsPagination
     filter_backends = [DjangoFilterBackend, SearchFilter, OrderingFilter]
     filterset_fields = ['supplier', 'status']
     search_fields = ['order_number', 'supplier__name']

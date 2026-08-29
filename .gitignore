@@ -25,3 +25,9 @@ myenv/
 # Django
 /staticfiles/
 /media/
+
+# Vercel
+.vercel
+.env*
+myshop/local_test_settings.py
+local_test_db.sqlite3

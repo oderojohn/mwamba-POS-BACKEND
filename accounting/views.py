@@ -2,6 +2,7 @@ from rest_framework import viewsets, status
 from rest_framework.decorators import action
 from rest_framework.response import Response
 from rest_framework.permissions import IsAuthenticated
+from myshop.pagination import StandardResultsPagination
 from django.db.models import Sum, Q
 from django.db.models.functions import Coalesce
 from decimal import Decimal
@@ -104,14 +105,15 @@ class JournalEntryViewSet(viewsets.ModelViewSet):
     """ViewSet for Journal Entries"""
     queryset = JournalEntry.objects.all()
     permission_classes = [IsAuthenticated]
-    
+    pagination_class = StandardResultsPagination
+
     def get_serializer_class(self):
         if self.action in ['create', 'update', 'partial_update']:
             return JournalEntryCreateSerializer
         return JournalEntrySerializer
-    
+
     def get_queryset(self):
-        queryset = JournalEntry.objects.all().prefetch_related('entries__account')
+        queryset = JournalEntry.objects.all().select_related('created_by').prefetch_related('entries__account')
         
         # Filter by date range
         start_date = self.request.query_params.get('start_date')
@@ -206,9 +208,10 @@ class RecurringExpenseViewSet(viewsets.ModelViewSet):
     queryset = RecurringExpense.objects.all()
     serializer_class = RecurringExpenseSerializer
     permission_classes = [IsAuthenticated]
-    
+    pagination_class = StandardResultsPagination
+
     def get_queryset(self):
-        queryset = RecurringExpense.objects.all()
+        queryset = RecurringExpense.objects.select_related('account')
         
         is_active = self.request.query_params.get('is_active')
         if is_active is not None:
