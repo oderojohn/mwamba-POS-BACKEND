@@ -26,9 +26,7 @@ class SupplierPriceHistoryViewSet(viewsets.ModelViewSet):
     ordering = ['-date']
 
 class PurchaseOrderViewSet(viewsets.ModelViewSet):
-    queryset = PurchaseOrder.objects.select_related('supplier').prefetch_related(
-        'items', 'items__product'
-    ).order_by('-created_at')
+    queryset = PurchaseOrder.objects.select_related('supplier').order_by('-created_at')
     serializer_class = PurchaseOrderSerializer
     pagination_class = StandardResultsPagination
     filter_backends = [DjangoFilterBackend, SearchFilter, OrderingFilter]
@@ -37,6 +35,17 @@ class PurchaseOrderViewSet(viewsets.ModelViewSet):
     ordering_fields = ['order_date', 'expected_delivery_date', 'created_at']
     ordering = ['-created_at']  # Most recent first
     http_method_names = ['get', 'post', 'put', 'patch', 'delete']
+
+    def get_queryset(self):
+        queryset = super().get_queryset()
+        if self.action == 'list':
+            # Only prefetch items for the list view. Actions like receive_batch
+            # mutate an item and then re-read purchase_order.items.all() (via
+            # update_status()) in the same request - a cached prefetch here
+            # would make that re-read see stale received_quantity values and
+            # leave the order stuck on "partially_received".
+            queryset = queryset.prefetch_related('items', 'items__product')
+        return queryset
 
     def partial_update(self, request, *args, **kwargs):
         """Handle PATCH requests for partial updates"""
