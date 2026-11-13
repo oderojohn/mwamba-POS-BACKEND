@@ -95,6 +95,18 @@ DATABASES = {
         ssl_require=True
     )
 }
+# Neon's pooler (PgBouncer, transaction mode) cannot hold named server-side cursors
+DATABASES['default']['DISABLE_SERVER_SIDE_CURSORS'] = True
+# Local development: set USE_SQLITE=1 to use the bundled db.sqlite3 instead of the production Neon DB
+# Tests always use SQLite so `manage.py test` can never create/modify anything on the production DB
+import sys as _sys
+if os.environ.get('USE_SQLITE') == '1' or (len(_sys.argv) > 1 and _sys.argv[1] == 'test'):
+    DATABASES = {
+        'default': {
+            'ENGINE': 'django.db.backends.sqlite3',
+            'NAME': BASE_DIR / 'db.sqlite3',
+        }
+    }
 # DATABASES = {
 #     'default': {
 #         'ENGINE': 'django.db.backends.sqlite3',
@@ -161,6 +173,7 @@ CORS_ALLOWED_ORIGINS = [
     "http://localhost:3001",        # added
     "http://192.168.10.219:3001",   # added
     "https://mwambaliquor.netlify.app",  # added
+    "app://pos",  # packaged Electron app
 ]
 
 CORS_ALLOW_CREDENTIALS = True
@@ -180,3 +193,15 @@ SECURE_BROWSER_XSS_FILTER = True
 SECURE_CONTENT_TYPE_NOSNIFF = True
 SESSION_COOKIE_SECURE = not DEBUG
 CSRF_COOKIE_SECURE = not DEBUG
+
+# Tests build the schema from models: the historical migration chain cannot create a
+# fresh database (inventory/0010_create_missing_models re-creates tables from 0003).
+if len(_sys.argv) > 1 and _sys.argv[1] == 'test':
+    class _DisableMigrations:
+        def __contains__(self, item):
+            return True
+
+        def __getitem__(self, item):
+            return None
+
+    MIGRATION_MODULES = _DisableMigrations()

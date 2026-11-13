@@ -60,8 +60,10 @@ class Sale(models.Model):
     tax_amount = models.DecimalField(max_digits=10, decimal_places=2, default=0)
     discount_amount = models.DecimalField(max_digits=10, decimal_places=2, default=0)
     final_amount = models.DecimalField(max_digits=10, decimal_places=2)
-    sale_date = models.DateTimeField(auto_now_add=True)
+    sale_date = models.DateTimeField(auto_now_add=True, db_index=True)
     receipt_number = models.CharField(max_length=50, unique=True)
+    # Client-generated id (UUID) so retried/replayed checkouts never create duplicate sales
+    client_txn_id = models.CharField(max_length=64, unique=True, null=True, blank=True)
     
     # Return code functionality
     return_code_used = models.CharField(max_length=20, null=True, blank=True)
@@ -111,7 +113,14 @@ class Return(models.Model):
     
     sale = models.ForeignKey(Sale, on_delete=models.CASCADE)
     shift = models.ForeignKey('shifts.Shift', on_delete=models.SET_NULL, null=True, blank=True, related_name='returns')
-    return_date = models.DateTimeField(auto_now_add=True)
+    REFUND_METHODS = [
+        ('return_code', 'Store credit (return code)'),
+        ('cash', 'Cash refund'),
+        ('mpesa', 'M-Pesa refund'),
+    ]
+
+    return_date = models.DateTimeField(auto_now_add=True, db_index=True)
+    refund_method = models.CharField(max_length=20, choices=REFUND_METHODS, default='return_code')
     return_type = models.CharField(max_length=20, choices=RETURN_TYPES, default='partial_return')
     reason = models.TextField()
     total_refund_amount = models.DecimalField(max_digits=10, decimal_places=2)
@@ -155,6 +164,8 @@ class ReturnCode(models.Model):
     created_at = models.DateTimeField(auto_now_add=True)
     used_at = models.DateTimeField(null=True, blank=True)
     used_in_sale = models.ForeignKey('Sale', on_delete=models.SET_NULL, null=True, blank=True, related_name='applied_return_codes')
+    # Set when this code holds the unused remainder of another code redeemed in a sale
+    issued_from_sale = models.ForeignKey('Sale', on_delete=models.SET_NULL, null=True, blank=True, related_name='issued_return_codes')
     
     def __str__(self):
         return f"ReturnCode {self.code}"

@@ -30,6 +30,30 @@ from .serializers import (
     CustomerSummarySerializer, ShiftSummarySerializer
 )
 
+
+def sales_profit(sales_qs):
+    """Net revenue, cost of goods sold and gross profit for a Sale queryset, in the DB.
+
+    Voided sales are excluded. Returned units are excluded from cost, and refunds are
+    subtracted from revenue. Cost uses the product's cost price.
+    """
+    from sales.models import Return, SaleItem
+    from django.db.models import DecimalField, ExpressionWrapper
+    live = sales_qs.filter(voided=False)
+    agg = live.aggregate(revenue=Sum('final_amount'), count=Count('id'))
+    refunds = Return.objects.filter(sale__in=live).aggregate(t=Sum('total_refund_amount'))['t'] or Decimal('0')
+    cogs = SaleItem.objects.filter(sale__in=live).aggregate(t=Sum(ExpressionWrapper(
+        F('product__cost_price') * (F('quantity') - F('returned_quantity')),
+        output_field=DecimalField(max_digits=14, decimal_places=2))))['t'] or Decimal('0')
+    revenue = (agg['revenue'] or Decimal('0')) - refunds
+    return {
+        'revenue': float(revenue),
+        'transactions': agg['count'] or 0,
+        'cost_of_goods_sold': float(cogs),
+        'gross_profit': float(revenue - cogs),
+        'refunds': float(refunds),
+    }
+
 class ReportViewSet(viewsets.ModelViewSet):
     queryset = Report.objects.all()
     serializer_class = ReportSerializer
@@ -597,25 +621,13 @@ class SalesSummaryView(generics.GenericAPIView):
             else:
                 payment_breakdown[payment_type] = payment_breakdown.get(payment_type, 0) + amount
 
-        # Get total sales and transactions
-        total_sales = sum(float(sale.final_amount) for sale in sales)
-        total_transactions = sales.count()
-
-        # Calculate actual gross profit for all sales
-        gross_profit = 0
-        for sale in sales:
-            for item in sale.saleitem_set.all():
-                if item.product and item.product.cost_price:
-                    profit_per_item = (item.unit_price - item.product.cost_price) * item.quantity
-                    gross_profit += float(profit_per_item)
-
-        # Calculate cost of goods sold
-        cost_of_goods_sold = sum(
-            float(item.product.cost_price * item.quantity)
-            for sale in sales
-            for item in sale.saleitem_set.all()
-            if item.product and item.product.cost_price
-        )
+        # Totals over all non-voided sales (net of returns), computed in the database.
+        # `sales` (last 1000) is only used for the recent-sales list below.
+        totals = sales_profit(Sale.objects.all())
+        total_sales = totals['revenue']
+        total_transactions = totals['transactions']
+        gross_profit = totals['gross_profit']
+        cost_of_goods_sold = totals['cost_of_goods_sold']
 
         # Net profit (estimated as gross profit minus 5% operating costs)
         net_profit = gross_profit * 0.95
@@ -662,10 +674,12 @@ class SalesSummaryView(generics.GenericAPIView):
         from sales.models import Sale, SaleItem, Cart, Return
         from payments.models import Payment
 
-        # Build queryset for shifts
+        # Build queryset for shifts. Without dates, default to the last 30 days: the
+        # unfiltered version returned every shift ever (megabytes, and "today" showed all-time totals).
+        if not date_from and not date_to:
+            date_to = timezone.localdate()
+            date_from = date_to - timedelta(days=29)
         shifts_query = Shift.objects.select_related('cashier__user').order_by('-start_time')
-
-        # Only filter by date if dates are provided
         if date_from and date_to:
             shifts_query = shifts_query.filter(start_time__date__range=[date_from, date_to])
         elif date_from:
@@ -673,8 +687,12 @@ class SalesSummaryView(generics.GenericAPIView):
         elif date_to:
             shifts_query = shifts_query.filter(start_time__date__lte=date_to)
 
-        # Limit to recent shifts for performance
-        shifts = shifts_query[:500]
+        # Every shift in the range counts towards totals (no silent cap). Itemised
+        # sales/returns/held orders are attached only to the most recent shifts.
+        DETAIL_LIMIT = 100
+        shifts = list(shifts_query)
+        shift_ids = [sh.id for sh in shifts]
+        detail_ids = set(shift_ids[:DETAIL_LIMIT])
 
         shift_summaries = []
         total_sales = 0
@@ -683,73 +701,77 @@ class SalesSummaryView(generics.GenericAPIView):
         total_return_count = 0
         total_gross_profit = 0
         total_cost_of_goods_sold = 0
-
         payment_breakdown = {}
 
+        # ---- per-shift aggregates (a fixed number of grouped queries, any range size)
+        from collections import defaultdict
+        from django.db.models import DecimalField, ExpressionWrapper
+        money = DecimalField(max_digits=14, decimal_places=2)
+        sales_agg = {r['shift_id']: r for r in Sale.objects.filter(shift_id__in=shift_ids, voided=False)
+                     .values('shift_id').annotate(total=Sum('final_amount'), count=Count('id'))}
+        refunds_by_shift = {r['sale__shift_id']: r['t'] for r in Return.objects.filter(
+            sale__shift_id__in=shift_ids, sale__voided=False).values('sale__shift_id').annotate(
+            t=Sum('total_refund_amount'))}
+        cogs_by_shift = {r['sale__shift_id']: r['t'] for r in SaleItem.objects.filter(
+            sale__shift_id__in=shift_ids, sale__voided=False).values('sale__shift_id').annotate(
+            t=Sum(ExpressionWrapper(F('product__cost_price') * (F('quantity') - F('returned_quantity')),
+                                    output_field=money)))}
+        returns_agg = {r['shift_id']: r for r in Return.objects.filter(shift_id__in=shift_ids, sale__voided=False)
+                       .values('shift_id').annotate(total=Sum('total_refund_amount'), count=Count('id'))}
+        pay_by_shift = defaultdict(dict)
+        for r in Payment.objects.filter(sale__shift_id__in=shift_ids, sale__voided=False, status='completed') \
+                .exclude(payment_type='split').values('sale__shift_id', 'payment_type').annotate(t=Sum('amount')):
+            pay_by_shift[r['sale__shift_id']][r['payment_type']] = float(r['t'] or 0)
+        for p in Payment.objects.filter(sale__shift_id__in=shift_ids, sale__voided=False, status='completed',
+                                        payment_type='split').values('sale__shift_id', 'split_data', 'amount'):
+            bucket = pay_by_shift[p['sale__shift_id']]
+            if p['split_data']:
+                for method, split_amount in p['split_data'].items():
+                    bucket[method] = bucket.get(method, 0) + float(split_amount)
+            else:
+                bucket['split'] = bucket.get('split', 0) + float(p['amount'])
+
+        # ---- itemised detail, only for the most recent shifts
+        sales_by_shift = defaultdict(list)
+        voided_by_shift = defaultdict(list)
+        for sale in Sale.objects.filter(shift_id__in=detail_ids).select_related('customer').prefetch_related(
+                'payment_set', 'saleitem_set__product').order_by('-sale_date'):
+            (voided_by_shift if sale.voided else sales_by_shift)[sale.shift_id].append(sale)
+        returns_by_shift = defaultdict(list)
+        for ret in Return.objects.filter(shift_id__in=detail_ids, sale__voided=False).select_related(
+                'sale', 'processed_by__user').prefetch_related('items__sale_item__product'):
+            returns_by_shift[ret.shift_id].append(ret)
+        detail_shifts = [sh for sh in shifts if sh.id in detail_ids]
+        held_by_cashier = defaultdict(list)
+        if detail_shifts:
+            oldest = min(sh.start_time for sh in detail_shifts)
+            for cart in Cart.objects.filter(cashier_id__in={sh.cashier_id for sh in detail_shifts}, status='held',
+                                            created_at__gte=oldest) \
+                    .select_related('customer').prefetch_related('cartitem_set__product'):
+                held_by_cashier[cart.cashier_id].append(cart)
+        now = timezone.now()
+
         for shift in shifts:
-            # Get sales for this shift
-            shift_sales = Sale.objects.filter(
-                shift_id=shift.id,
-                voided=False
-            ).select_related('customer').prefetch_related('payment_set', 'saleitem_set__product')
-
-            # Get voided sales for this shift
-            voided_sales = Sale.objects.filter(
-                shift_id=shift.id,
-                voided=True
-            ).select_related('customer').prefetch_related('saleitem_set__product')
-
-            # Get returns for this shift (filter by return's shift to show returns processed during this shift)
-            shift_returns = Return.objects.filter(
-                shift_id=shift.id,
-                sale__voided=False
-            ).select_related('sale', 'processed_by__user').prefetch_related('items__sale_item__product')
-
-            # Get held orders for this shift
-            held_orders = Cart.objects.filter(
-                cashier=shift.cashier,
-                status='held',
-                created_at__gte=shift.start_time,
-                created_at__lte=shift.end_time or timezone.now()
-            ).select_related('customer').prefetch_related('cartitem_set__product')
-
-            if not shift_sales.exists():
+            agg = sales_agg.get(shift.id)
+            if not agg or not agg['count']:
                 continue
+            shift_sales = sales_by_shift.get(shift.id, [])
+            voided_sales = voided_by_shift.get(shift.id, [])
+            shift_returns = returns_by_shift.get(shift.id, [])
+            end = shift.end_time or now
+            held_orders = [c for c in held_by_cashier.get(shift.cashier_id, [])
+                           if shift.id in detail_ids and shift.start_time <= c.created_at <= end]
 
-            # Calculate shift totals
-            shift_total_sales = sum(float(sale.final_amount) for sale in shift_sales)
-            shift_transactions = shift_sales.count()
-
-            # Calculate shift returns
-            shift_total_returns = sum(float(ret.total_refund_amount) for ret in shift_returns)
-            shift_return_count = shift_returns.count()
-
-            # Calculate gross profit for shift
-            shift_gross_profit = 0
-            shift_cost_of_goods_sold = 0
-            for sale in shift_sales:
-                for item in sale.saleitem_set.all():
-                    if item.product and item.product.cost_price:
-                        profit_per_item = (item.unit_price - item.product.cost_price) * item.quantity
-                        shift_gross_profit += float(profit_per_item)
-                        shift_cost_of_goods_sold += float(item.product.cost_price * item.quantity)
-
-            # Get payment breakdown for shift
-            shift_payments = Payment.objects.filter(
-                sale__shift_id=shift.id,
-                sale__voided=False,
-                status='completed'
-            )
-
-            shift_payment_breakdown = {}
-            for payment in shift_payments:
-                payment_type = payment.payment_type
-                amount = float(payment.amount)
-                if payment.payment_type == 'split' and payment.split_data:
-                    for method, split_amount in payment.split_data.items():
-                        shift_payment_breakdown[method] = shift_payment_breakdown.get(method, 0) + float(split_amount)
-                else:
-                    shift_payment_breakdown[payment_type] = shift_payment_breakdown.get(payment_type, 0) + amount
+            revenue = (agg['total'] or Decimal('0')) - (refunds_by_shift.get(shift.id) or 0)
+            cogs = cogs_by_shift.get(shift.id) or Decimal('0')
+            shift_total_sales = float(revenue)
+            shift_transactions = agg['count']
+            ragg = returns_agg.get(shift.id) or {}
+            shift_total_returns = float(ragg.get('total') or 0)
+            shift_return_count = ragg.get('count') or 0
+            shift_gross_profit = float(revenue - cogs)
+            shift_cost_of_goods_sold = float(cogs)
+            shift_payment_breakdown = dict(pay_by_shift.get(shift.id, {}))
 
             # Add to overall totals
             total_sales += shift_total_sales
@@ -882,6 +904,10 @@ class SalesSummaryView(generics.GenericAPIView):
             'cost_of_goods_sold': total_cost_of_goods_sold,
             'sales_by_payment_method': payment_breakdown,
             'shifts': shift_summaries,
+            'date_from': str(date_from) if date_from else None,
+            'date_to': str(date_to) if date_to else None,
+            'shift_count': len(shift_summaries),
+            'details_limited_to': DETAIL_LIMIT if len(shift_summaries) > DETAIL_LIMIT else None,
             'recent_sales': []  # Keep for compatibility, but empty since we're showing shifts
         }
 
@@ -1051,7 +1077,7 @@ class SalesSummaryView(generics.GenericAPIView):
 
     def _determine_payment_method(self, sale):
         """Determine payment method based on payment records"""
-        payments = list(sale.payment_set.filter(status='completed'))
+        payments = [p for p in sale.payment_set.all() if p.status == 'completed']
         if not payments:
             return 'N/A'
 
@@ -1076,7 +1102,7 @@ class SalesSummaryView(generics.GenericAPIView):
     def _get_split_data_for_sale(self, sale):
         """Get split data for a sale, reconstructing from payment records if needed"""
         # For split payments, reconstruct split_data from payment records
-        payments = list(sale.payment_set.filter(status='completed'))
+        payments = [p for p in sale.payment_set.all() if p.status == 'completed']
         if len(payments) > 1:
             split_data = {}
             for payment in payments:
@@ -1084,7 +1110,7 @@ class SalesSummaryView(generics.GenericAPIView):
             return split_data
 
         # Fallback to old logic for legacy split payments
-        split_payment = sale.payment_set.filter(payment_type='split').first()
+        split_payment = next((p for p in sale.payment_set.all() if p.payment_type == 'split'), None)
         if split_payment and split_payment.split_data:
             # Only return if it's truly split (both amounts > 0)
             split_data = {k: v for k, v in split_payment.split_data.items() if float(v) > 0}
@@ -1096,7 +1122,7 @@ class SalesSummaryView(generics.GenericAPIView):
         from sales.models import Sale
         today = timezone.now().date()
         today_sales = Sale.objects.filter(
-            sale_date__date=today
+            sale_date__date=today, voided=False
         ).aggregate(total=Sum('final_amount'))['total'] or Decimal('0')
         return float(today_sales)
 
@@ -1105,25 +1131,11 @@ class SalesSummaryView(generics.GenericAPIView):
         from django.db.models import Sum
         from decimal import Decimal
         
-        total_sales = Sale.objects.aggregate(total=Sum('final_amount'))['total'] or Decimal('0')
-        total_sales = float(total_sales)
-        
-        # Calculate cost of goods sold and gross profit from sale items using REAL data
-        sales_items = SaleItem.objects.filter(
-            sale__voided=False
-        ).select_related('product')
-        
-        total_cost = 0
-        gross_profit = 0
-        
-        for item in sales_items:
-            if item.product and item.product.cost_price:
-                # Real calculation: (selling_price - cost_price) * quantity
-                cost = float(item.product.cost_price) * item.quantity
-                revenue = float(item.unit_price) * item.quantity
-                total_cost += cost
-                gross_profit += (revenue - cost)
-        
+        totals = sales_profit(Sale.objects.all())
+        total_sales = totals['revenue']
+        total_cost = totals['cost_of_goods_sold']
+        gross_profit = totals['gross_profit']
+
         # If no cost data, profit is 0
         net_profit = gross_profit * 0.95 if gross_profit > 0 else 0
         
@@ -1417,23 +1429,31 @@ class SalesSummaryView(generics.GenericAPIView):
                 payments_by_date[date_key] = {}
             payments_by_date[date_key][payment['payment_type']] = float(payment['amount'])
 
+        # Item revenue and cost per day in ONE grouped query (was one query + a Python
+        # loop over every sale line, per day: minutes for a year of data)
+        from django.db.models import DecimalField, ExpressionWrapper
+        money = DecimalField(max_digits=14, decimal_places=2)
+        items_by_date = {
+            row['date'].strftime('%Y-%m-%d'): row
+            for row in SaleItem.objects.filter(
+                sale__sale_date__date__range=[date_from, date_to],
+                sale__voided=False,
+            ).annotate(date=TruncDate('sale__sale_date')).values('date').annotate(
+                # products without a cost price are left out of profit (as before)
+                item_revenue=Sum(ExpressionWrapper(F('unit_price') * F('quantity'), output_field=money),
+                                 filter=Q(product__cost_price__gt=0)),
+                cogs=Sum(ExpressionWrapper(F('product__cost_price') * F('quantity'), output_field=money),
+                         filter=Q(product__cost_price__gt=0)),
+            )
+        }
+
         result = []
         for sale in sales:
             date_str = sale['date'].strftime('%Y-%m-%d')
             day_payments = payments_by_date.get(date_str, {})
-            # Calculate actual gross profit for the day
-            sales_items_for_day = SaleItem.objects.filter(
-                sale__sale_date__date=sale['date'],
-                sale__voided=False
-            ).select_related('product')
-
-            day_gross_profit = 0
-            day_cost_of_goods_sold = 0
-            for item in sales_items_for_day:
-                if item.product and item.product.cost_price:
-                    profit_per_item = (item.unit_price - item.product.cost_price) * item.quantity
-                    day_gross_profit += float(profit_per_item)
-                    day_cost_of_goods_sold += float(item.product.cost_price * item.quantity)
+            day_items = items_by_date.get(date_str) or {}
+            day_cost_of_goods_sold = float(day_items.get('cogs') or 0)
+            day_gross_profit = float(day_items.get('item_revenue') or 0) - day_cost_of_goods_sold
 
             # Net profit (estimated as gross profit minus 5% operating costs)
             day_net_profit = day_gross_profit * 0.95

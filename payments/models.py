@@ -24,7 +24,7 @@ class Payment(models.Model):
         ('failed', 'Failed'),
         ('refunded', 'Refunded'),
     ], default='pending')
-    created_at = models.DateTimeField(auto_now_add=True)
+    created_at = models.DateTimeField(auto_now_add=True, db_index=True)
     
     def __str__(self):
         return f"{self.payment_type} - {self.amount} for Sale {self.sale.receipt_number}"

@@ -48,7 +48,19 @@ class LoginView(TokenObtainPairView):
             user = authenticate(username=username, password=request.data.get('password'))
 
             if user:
-                groups = list(user.groups.values_list('name', flat=True))
+                # Frontend compares lowercase role names ('admin', 'storekeeper', 'pos', ...).
+                # Groups exist in mixed case ('Admin', 'admin'), and some users only have a
+                # profile role, which used to give them an empty sidebar.
+                groups = []
+                for name in user.groups.values_list('name', flat=True):
+                    role_name = name.strip().lower()
+                    if role_name == 'cashier':
+                        role_name = 'pos'
+                    if role_name not in groups:
+                        groups.append(role_name)
+                profile = getattr(user, 'userprofile', None)
+                if not groups and profile and profile.role:
+                    groups = ['pos' if profile.role == 'cashier' else profile.role]
                 response.data["roles"] = groups  # Frontend expects array
                 response.data["role"] = groups[0] if groups else None
                 response.data["user_group"] = groups[0] if groups else None

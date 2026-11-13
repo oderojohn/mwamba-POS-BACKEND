@@ -47,10 +47,10 @@ class ShiftSerializer(serializers.ModelSerializer):
         return None
 
     def get_transaction_count(self, obj):
-        try:
-            return obj.sale_set.count()
-        except:
-            return 0
+        annotated = getattr(obj, 'sale_count', None)
+        if annotated is not None:
+            return annotated
+        return obj.sale_set.count()
 
     def get_cashier_name(self, obj):
         try:
@@ -86,23 +86,12 @@ class ShiftSerializer(serializers.ModelSerializer):
         actual = float(obj.closing_balance or 0)
         return actual - expected
 
+    # Stored on the shift by Shift.recompute_totals() whenever a sale/return/void changes it
     def get_return_count(self, obj):
-        """Get the count of returns processed in this shift"""
-        from sales.models import Return
-        # Filter by return's shift only (when return was processed, not when sale was made)
-        return Return.objects.filter(
-            shift=obj
-        ).count()
+        return obj.return_count or 0
 
     def get_total_returns(self, obj):
-        """Get the total refund amount for returns processed in this shift"""
-        from sales.models import Return
-        from django.db.models import Sum
-        # Filter by return's shift only (when return was processed, not when sale was made)
-        result = Return.objects.filter(
-            shift=obj
-        ).aggregate(total=Sum('total_refund_amount'))
-        return float(result['total'] or 0)
+        return float(obj.total_returns or 0)
 
     def get_returns(self, obj):
         """Get all returns processed in this shift"""
@@ -117,3 +106,15 @@ class ShiftSerializer(serializers.ModelSerializer):
         ).prefetch_related('items__sale_item__product').order_by('-return_date')
         
         return ReturnSerializer(returns, many=True).data
+
+class ShiftListSerializer(ShiftSerializer):
+    """Shift lists: totals only. Nested sales/returns (hundreds of rows per shift)
+    are left out; fetch a single shift for those."""
+
+    class Meta(ShiftSerializer.Meta):
+        fields = [f for f in ShiftSerializer.Meta.fields if f not in ('sales', 'returns')]
+
+
+def shift_list_queryset(qs):
+    from django.db.models import Count
+    return qs.select_related('cashier__user', 'approved_by__user').annotate(sale_count=Count('sale', distinct=True))

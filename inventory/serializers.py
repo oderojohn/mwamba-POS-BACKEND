@@ -47,6 +47,10 @@ class BatchSerializer(serializers.ModelSerializer):
             if hasattr(self.instance, 'status') and self.instance.status == 'received':
                 self.fields['status'].read_only = True
                 self.fields['received_date'].read_only = True
+                self.fields['quantity'].read_only = True  # changes go through receive/recall/sales
+        if 'status' in self.fields and not (self.instance and getattr(self.instance, 'status', None) == 'received'):
+            # 'received' can only be set by the receive endpoint (it adds the stock)
+            self.fields['status'].choices = [c for c in Batch.BATCH_STATUS if c[0] != 'received']
 
     class Meta:
         model = Batch

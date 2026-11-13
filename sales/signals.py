@@ -27,30 +27,14 @@ def create_default_payment(sender, instance, created, **kwargs):
 
 @receiver(post_save, sender=Return)
 def update_shift_return_totals(sender, instance, created, **kwargs):
-    """
-    Update shift return totals when a return is created or modified.
-    """
-    from shifts.models import Shift
-    
-    sale = instance.sale
-    if sale and sale.shift:
-        try:
-            shift = Shift.objects.get(id=sale.shift.id)
-            shift.update_return_totals()
-        except Shift.DoesNotExist:
-            pass
+    """Recompute totals of the shift in which the return was processed."""
+    if instance.shift_id:
+        instance.shift.recompute_totals()
+
 
 @receiver(post_delete, sender=Return)
 def update_shift_return_totals_on_delete(sender, instance, **kwargs):
-    """
-    Update shift return totals when a return is deleted.
-    """
     from shifts.models import Shift
-    
-    sale = instance.sale
-    if sale and sale.shift:
-        try:
-            shift = Shift.objects.get(id=sale.shift.id)
-            shift.update_return_totals()
-        except Shift.DoesNotExist:
-            pass
+    shift = Shift.objects.filter(id=instance.shift_id).first()
+    if shift:
+        shift.recompute_totals()

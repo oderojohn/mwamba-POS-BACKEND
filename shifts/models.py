@@ -29,59 +29,59 @@ class Shift(models.Model):
     def __str__(self):
         return f"Shift {self.id} - {self.cashier.user.username} - {self.status}"
     
-    def update_return_totals(self):
-        """Calculate and update return totals from returns processed during this shift"""
-        from django.db.models import Sum, Count
-        from sales.models import Return
-        
-        # Get returns processed during this shift
-        returns_data = Return.objects.filter(
-            shift_id=self.id
-        ).aggregate(
-            total=Sum('total_refund_amount'),
-            count=Count('id')
-        )
-        
-        self.total_returns = returns_data['total'] or 0
-        self.return_count = returns_data['count'] or 0
-        self.net_sales = self.total_sales - self.total_returns
-        
-        self.save(update_fields=['total_returns', 'return_count', 'net_sales'])
-        return self
-    
-    def refresh_totals(self):
-        """Refresh all calculated totals for the shift"""
+    class Meta:
+        constraints = [
+            models.UniqueConstraint(
+                fields=['cashier'], condition=models.Q(status='open'),
+                name='one_open_shift_per_cashier',
+            ),
+        ]
+
+    def recompute_totals(self, save=True):
+        """Derive all shift totals from Payment and Return records.
+
+        cash/mobile/card sales = completed payments on non-voided sales in this shift.
+        total_sales = final amount of non-voided sales (includes the part settled
+        with return-code credit, which is not a payment).
+        total_returns = refunds of returns processed in this shift.
+        """
         from django.db.models import Sum, Count, Q
-        from sales.models import Sale, Return
-        
-        # Calculate from sales
-        sales_qs = self.sale_set.filter(voided=False)
-        
-        sales_data = sales_qs.aggregate(
-            cash=Sum('cash_received', filter=Q(payment_method='cash')),
-            card=Sum('cash_received', filter=Q(payment_method='card')),
-            mobile=Sum('cash_received', filter=Q(payment_method='mpesa')),
-            total=Sum('final_amount'),
-            count=Count('id')
+        from decimal import Decimal
+        from payments.models import Payment
+        from sales.models import Return
+
+        pay = Payment.objects.filter(sale__shift=self, sale__voided=False, status='completed')
+        by_type = pay.aggregate(
+            cash=Sum('amount', filter=Q(payment_type='cash')),
+            mobile=Sum('amount', filter=Q(payment_type='mpesa')),
         )
-        
-        self.cash_sales = sales_data['cash'] or 0
-        self.card_sales = sales_data['card'] or 0
-        self.mobile_sales = sales_data['mobile'] or 0
-        self.total_sales = sales_data['total'] or 0
-        self.transaction_count = sales_data['count'] or 0
-        
-        # Calculate returns - filter by return's shift (when return was processed)
-        returns_data = Return.objects.filter(
-            shift_id=self.id
-        ).aggregate(
-            total=Sum('total_refund_amount'),
-            count=Count('id')
+        sales = self.sale_set.filter(voided=False).aggregate(total=Sum('final_amount'))
+        rets = Return.objects.filter(shift=self).aggregate(
+            total=Sum('total_refund_amount'), count=Count('id'),
+            cash=Sum('total_refund_amount', filter=Q(refund_method='cash')),
         )
-        
-        self.total_returns = returns_data['total'] or 0
-        self.return_count = returns_data['count'] or 0
+        zero = Decimal('0')
+        self.cash_sales = by_type['cash'] or zero
+        self.mobile_sales = by_type['mobile'] or zero
+        self.card_sales = zero
+        self.total_sales = sales['total'] or zero
+        self.total_returns = rets['total'] or zero
+        self.return_count = rets['count'] or 0
         self.net_sales = self.total_sales - self.total_returns
-        
-        self.save(update_fields=['cash_sales', 'card_sales', 'mobile_sales', 'total_sales', 'transaction_count', 'total_returns', 'return_count', 'net_sales'])
+        self._cash_refunds = rets['cash'] or zero
+        if save:
+            self.save(update_fields=['cash_sales', 'mobile_sales', 'card_sales', 'total_sales',
+                                     'total_returns', 'return_count', 'net_sales'])
         return self
+
+    def expected_cash(self):
+        """Cash that should be in the drawer: opening + cash taken - cash refunded."""
+        self.recompute_totals(save=False)
+        return self.opening_balance + self.cash_sales - self._cash_refunds
+
+    # Backwards-compatible names used by signals/management commands
+    def update_return_totals(self):
+        return self.recompute_totals()
+
+    def refresh_totals(self):
+        return self.recompute_totals()

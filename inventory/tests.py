@@ -510,7 +510,8 @@ class StockMovementViewSetTest(APITestCase):
         self.assertEqual(response.status_code, status.HTTP_200_OK)
         self.assertEqual(len(response.data), 1)
 
-    def test_create_stock_movement(self):
+    def test_stock_movements_cannot_be_created_directly(self):
+        """Stock movements are an audit trail written only by inventory.stock."""
         url = '/api/inventory/stock-movements/'
         data = {
             'product': self.product.pk,
@@ -519,8 +520,8 @@ class StockMovementViewSetTest(APITestCase):
             'reason': 'Sale'
         }
         response = self.client.post(url, data, format='json')
-        self.assertEqual(response.status_code, status.HTTP_201_CREATED)
-        self.assertEqual(StockMovement.objects.count(), 2)
+        self.assertEqual(response.status_code, status.HTTP_405_METHOD_NOT_ALLOWED)
+        self.assertEqual(StockMovement.objects.count(), 1)
 
 
 class PurchaseViewSetTest(APITestCase):

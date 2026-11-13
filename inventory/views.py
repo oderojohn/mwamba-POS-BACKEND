@@ -20,6 +20,18 @@ from django.db.models import Sum, F
 from .models import Category, Product, Batch, StockMovement, Supplier, Purchase, PriceHistory, SalesHistory, ProductHistory
 from .serializers import CategorySerializer, ProductSerializer, BatchSerializer, StockMovementSerializer, SupplierSerializer, PurchaseSerializer, PriceHistorySerializer, SalesHistorySerializer, ProductHistorySerializer
 from django.db.models import Q
+from django.db import transaction
+from rest_framework.exceptions import PermissionDenied, ValidationError
+from . import stock
+
+
+def _profile(user):
+    return getattr(user, 'userprofile', None)
+
+
+def _is_manager(user):
+    p = _profile(user)
+    return user.is_superuser or bool(p and p.role in ('admin', 'manager'))
 from django.utils import timezone
 from datetime import datetime, date
 
@@ -32,7 +44,7 @@ class CategoryViewSet(viewsets.ModelViewSet):
     ordering = ['name']
 
 class ProductViewSet(viewsets.ModelViewSet):
-    queryset = Product.objects.all()
+    queryset = Product.objects.select_related('category')
     serializer_class = ProductSerializer
     pagination_class = ProductPagination
     filter_backends = [DjangoFilterBackend, SearchFilter, OrderingFilter]
@@ -57,40 +69,72 @@ class ProductViewSet(viewsets.ModelViewSet):
 
     @action(detail=False, methods=['post'])
     def recalculate_stock(self, request):
-        """Recalculate stock_quantity for all products from batch quantities"""
-        products = Product.objects.all()
+        """Compare product stock with received batches.
+
+        Report only by default. Pass {"apply": true} (manager/admin) to set stock to the
+        received-batch total for products that track batches. Products without batches
+        are never changed (the old version reset them to 0).
+        """
+        apply = bool(request.data.get('apply')) and _is_manager(request.user)
         results = []
-        
-        for product in products:
-            old_stock = product.stock_quantity
-            new_stock = product.recalculate_stock_from_batches()
-            results.append({
-                'product_id': product.id,
-                'product_name': product.name,
-                'old_stock': old_stock,
-                'new_stock': new_stock,
-                'difference': new_stock - old_stock
-            })
-        
-        return Response({
-            'message': f'Stock recalculated for {len(results)} products',
-            'results': results
-        })
+        with transaction.atomic():
+            for product in Product.objects.all().order_by('id'):
+                r = stock.reconcile(product, apply=apply, user=_profile(request.user))
+                if r['difference'] or r['applied']:
+                    results.append(r)
+        return Response({'applied': apply, 'mismatched_products': len(results), 'results': results})
 
     @action(detail=True, methods=['post'])
     def sync_stock(self, request, pk=None):
-        """Recalculate stock for a single product"""
+        """Compare (and with {"apply": true}, reconcile) one product against its batches."""
         product = self.get_object()
-        old_stock = product.stock_quantity
-        new_stock = product.recalculate_stock_from_batches()
-        
-        return Response({
-            'product_id': product.id,
-            'product_name': product.name,
-            'old_stock': old_stock,
-            'new_stock': new_stock,
-            'difference': new_stock - old_stock
-        })
+        apply = bool(request.data.get('apply')) and _is_manager(request.user)
+        with transaction.atomic():
+            return Response(stock.reconcile(product, apply=apply, user=_profile(request.user)))
+
+    @action(detail=True, methods=['post'])
+    def adjust_stock(self, request, pk=None):
+        """Manager/admin stock correction: {"delta": -3, "reason": "Breakage"}."""
+        if not _is_manager(request.user):
+            return Response({'error': 'Admin or Manager role required'}, status=status.HTTP_403_FORBIDDEN)
+        reason = (request.data.get('reason') or '').strip()
+        try:
+            delta = int(request.data.get('delta'))
+        except (TypeError, ValueError):
+            return Response({'error': 'delta must be a whole number'}, status=status.HTTP_400_BAD_REQUEST)
+        if not reason:
+            return Response({'error': 'A reason is required'}, status=status.HTTP_400_BAD_REQUEST)
+        try:
+            with transaction.atomic():
+                product = stock.adjust(self.get_object(), delta, user=_profile(request.user),
+                                       reason=f'Manual adjustment: {reason}')
+        except ValueError as e:
+            return Response({'error': str(e)}, status=status.HTTP_400_BAD_REQUEST)
+        return Response(ProductSerializer(product, context={'request': request}).data)
+
+    def perform_create(self, serializer):
+        """New product: opening stock is recorded as a stock movement."""
+        opening = int(serializer.validated_data.pop('stock_quantity', 0) or 0)
+        with transaction.atomic():
+            product = serializer.save(stock_quantity=0)
+            if opening:
+                stock.adjust(product, opening, user=_profile(self.request.user), reason='Opening stock')
+                product.refresh_from_db()
+
+    def perform_update(self, serializer):
+        """Stock can't be overwritten via product edit; changes go through stock.adjust."""
+        new_qty = serializer.validated_data.pop('stock_quantity', None)
+        with transaction.atomic():
+            product = serializer.save()
+            if new_qty is not None and int(new_qty) != int(product.stock_quantity):
+                if not _is_manager(self.request.user):
+                    raise PermissionDenied('Only a manager or admin can change stock quantities')
+                try:
+                    stock.adjust(product, int(new_qty) - int(product.stock_quantity),
+                                 user=_profile(self.request.user), reason='Stock edited on product form')
+                except ValueError as e:
+                    raise ValidationError({'stock_quantity': str(e)})
+                product.refresh_from_db()
 
 class BatchViewSet(viewsets.ModelViewSet):
     queryset = Batch.objects.select_related('product', 'supplier')
@@ -131,22 +175,28 @@ class BatchViewSet(viewsets.ModelViewSet):
         notes = request.data.get('notes', '')
         condition = request.data.get('condition', 'good')
 
-        # Validate actual quantity
-        if actual_quantity > batch.quantity:
+        try:
+            actual_quantity = int(actual_quantity)
+        except (TypeError, ValueError):
+            return Response({'error': 'actual_quantity must be a whole number'}, status=status.HTTP_400_BAD_REQUEST)
+        if actual_quantity < 0 or actual_quantity > batch.quantity:
             return Response(
-                {'error': 'Received quantity cannot exceed ordered quantity'},
+                {'error': 'Received quantity must be between 0 and the ordered quantity'},
                 status=status.HTTP_400_BAD_REQUEST
             )
 
-        # Update batch with receiving data
-        if cost_price is not None:
-            batch.cost_price = float(cost_price)
-        if received_date:
-            batch.received_date = received_date
-        batch.save()
-
-        # Create stock movement with actual received quantity
-        batch.receive_batch(actual_quantity)
+        with transaction.atomic():
+            if cost_price is not None:
+                batch.cost_price = cost_price
+            if received_date:
+                batch.received_date = received_date
+            batch.save()
+            try:
+                stock.receive_batch(batch, actual_quantity, user=_profile(request.user))
+            except ValueError as e:
+                transaction.set_rollback(True)
+                return Response({'error': str(e)}, status=status.HTTP_400_BAD_REQUEST)
+        batch.refresh_from_db()
 
         serializer = self.get_serializer(batch)
         return Response({
@@ -156,8 +206,8 @@ class BatchViewSet(viewsets.ModelViewSet):
             'condition': condition
         })
 
-class StockMovementViewSet(viewsets.ModelViewSet):
-    queryset = StockMovement.objects.all()
+class StockMovementViewSet(viewsets.ReadOnlyModelViewSet):
+    queryset = StockMovement.objects.select_related('product', 'user__user')
     serializer_class = StockMovementSerializer
     pagination_class = StockMovementPagination
     filter_backends = [DjangoFilterBackend, SearchFilter, OrderingFilter]
@@ -216,37 +266,39 @@ class PriceHistoryViewSet(viewsets.ModelViewSet):
         serializer = self.get_serializer(histories, many=True)
         return Response(serializer.data)
 
-class SalesHistoryViewSet(viewsets.ModelViewSet):
-    queryset = SalesHistory.objects.all()
+class SalesHistoryViewSet(viewsets.ReadOnlyModelViewSet):
+    """Sold units by batch. Read-only: rows are written by inventory.stock only.
+    The list is paginated; per-product/customer/date lookups return the latest 500 rows."""
+    queryset = SalesHistory.objects.select_related('product', 'customer', 'batch')
     serializer_class = SalesHistorySerializer
+    pagination_class = StockMovementPagination
     filter_backends = [DjangoFilterBackend, SearchFilter, OrderingFilter]
     filterset_fields = ['product', 'customer']
     search_fields = ['product__name', 'receipt_number']
     ordering_fields = ['sale_date']
     ordering = ['-sale_date']
+    LOOKUP_LIMIT = 500
+
+    def _respond(self, qs):
+        qs = qs.order_by('-sale_date')[:self.LOOKUP_LIMIT]
+        return Response(self.get_serializer(qs, many=True).data)
 
     @action(detail=False, methods=['get'], url_path=r'product/(?P<product_id>\d+)')
     def by_product(self, request, product_id=None):
-        histories = self.queryset.filter(product_id=product_id)
-        serializer = self.get_serializer(histories, many=True)
-        return Response(serializer.data)
+        return self._respond(self.get_queryset().filter(product_id=product_id))
 
     @action(detail=False, methods=['get'], url_path=r'customer/(?P<customer_id>\d+)')
     def by_customer(self, request, customer_id=None):
-        histories = self.queryset.filter(customer_id=customer_id)
-        serializer = self.get_serializer(histories, many=True)
-        return Response(serializer.data)
+        return self._respond(self.get_queryset().filter(customer_id=customer_id))
 
     @action(detail=False, methods=['get'], url_path='date')
     def by_date_range(self, request):
         from_date = request.query_params.get('from')
         to_date = request.query_params.get('to')
+        qs = self.get_queryset()
         if from_date and to_date:
-            histories = self.queryset.filter(sale_date__date__range=[from_date, to_date])
-        else:
-            histories = self.queryset
-        serializer = self.get_serializer(histories, many=True)
-        return Response(serializer.data)
+            qs = qs.filter(sale_date__date__range=[from_date, to_date])
+        return self._respond(qs)
 
 class ProductHistoryViewSet(viewsets.ModelViewSet):
     queryset = ProductHistory.objects.all()
@@ -690,23 +742,11 @@ class ProductRecallViewSet(viewsets.ModelViewSet):
         if batch.status == 'expired':
             return Response({'message': 'Batch is already expired'}, status=status.HTTP_400_BAD_REQUEST)
 
-        # Mark batch as expired (recall)
-        batch.status = 'expired'
-        batch.save()
-
-        # Remove from product stock
-        batch.product.stock_quantity -= batch.quantity
-        batch.product.save()
-
-        # Create stock movement record
-        StockMovement.objects.create(
-            product=batch.product,
-            movement_type='adjustment',
-            quantity=-batch.quantity,
-            reason=f'Product recall - Batch {batch.batch_number}',
-            user=request.user.userprofile if hasattr(request.user, 'userprofile') else None
-        )
-
+        with transaction.atomic():
+            removed = stock.remove_batch(batch, user=_profile(request.user),
+                                         reason=f'Product recall - Batch {batch.batch_number}')
+        if not removed:
+            return Response({'message': f'Batch {batch.batch_number} marked recalled (it had not been received, no stock removed)'})
         return Response({'message': f'Batch {batch.batch_number} recalled successfully'})
 
 # Profit analysis views
@@ -732,7 +772,7 @@ class ProfitAnalysisView(ListAPIView):
 
         total_sales = sales.aggregate(
             total_revenue=Sum('total_price'),
-            total_cost=Sum('cost_price') * Sum('quantity'),
+            total_cost=Sum(F('cost_price') * F('quantity'), output_field=models.DecimalField()),
             total_profit=Sum('profit')
         )
 

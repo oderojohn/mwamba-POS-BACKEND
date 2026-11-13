@@ -44,7 +44,8 @@ class SaleSerializer(serializers.ModelSerializer):
                   'receipt_number', 'return_code_used', 'return_code_amount',
                   'voided', 'void_reason', 'voided_at', 'voided_by', 
                   'edit_reason', 'edited_at', 'edited_by', 'payment_method', 'split_data', 
-                  'voided_by_name', 'edited_by_name', 'items', 'cart']
+                  'voided_by_name', 'edited_by_name', 'items', 'cart', 'client_txn_id']
+        read_only_fields = fields  # sales change only through checkout/void/return endpoints
     
     def get_items(self, obj):
         items = list(obj.saleitem_set.all())
@@ -55,8 +56,8 @@ class SaleSerializer(serializers.ModelSerializer):
                 'product': item.product.id if item.product else None,
                 'product_name': item.product.name if item.product else None,
                 'quantity': item.quantity,
-                'quantity_returned': 0,
-                'quantity_remaining': item.quantity,
+                'quantity_returned': item.returned_quantity,
+                'quantity_remaining': item.quantity - item.returned_quantity,
                 'unit_price': str(item.unit_price),
                 'discount': str(item.discount)
             }
@@ -69,9 +70,17 @@ class SaleSerializer(serializers.ModelSerializer):
         except AttributeError:
             return None
 
+    @staticmethod
+    def _payments(obj):
+        """Payments from the prefetch cache (no query per sale when prefetched).
+        Voided sales have refunded payments; fall back to those so the method still shows."""
+        allp = list(obj.payment_set.all())
+        done = [p for p in allp if p.status == 'completed']
+        return done or [p for p in allp if p.status == 'refunded']
+
     def get_payment_method(self, obj):
         # Determine payment method based on payment records
-        payments = list(obj.payment_set.filter(status='completed'))
+        payments = self._payments(obj)
         if not payments:
             return 'cash'
 
@@ -95,7 +104,7 @@ class SaleSerializer(serializers.ModelSerializer):
 
     def get_split_data(self, obj):
         # For split payments, reconstruct split_data from payment records
-        payments = list(obj.payment_set.filter(status='completed'))
+        payments = self._payments(obj)
         if len(payments) > 1:
             split_data = {}
             for payment in payments:
@@ -103,7 +112,7 @@ class SaleSerializer(serializers.ModelSerializer):
             return split_data
 
         # Fallback to old logic for legacy split payments
-        split_payment = obj.payment_set.filter(payment_type='split').first()
+        split_payment = next((p for p in obj.payment_set.all() if p.payment_type == 'split'), None)
         if split_payment and split_payment.split_data:
             # Only return if it's truly split (both amounts > 0)
             split_data = {k: v for k, v in split_payment.split_data.items() if float(v) > 0}
@@ -148,8 +157,8 @@ class ReturnSerializer(serializers.ModelSerializer):
         return []
     
     def get_return_code(self, obj):
-        # Return code functionality not implemented
-        return None
+        codes = list(obj.return_codes.all())  # prefetched by ReturnViewSet
+        return codes[0].code if codes else None
 
 
 class ReturnItemSerializer(serializers.ModelSerializer):

@@ -66,24 +66,33 @@ class PurchaseOrderViewSet(viewsets.ModelViewSet):
         except PurchaseOrderItem.DoesNotExist:
             return Response({'error': 'Purchase order item not found'}, status=status.HTTP_404_NOT_FOUND)
 
-        if item.received_quantity + quantity > item.quantity:
-            return Response({'error': 'Received quantity exceeds ordered quantity'}, status=status.HTTP_400_BAD_REQUEST)
+        try:
+            quantity = int(quantity)
+        except (TypeError, ValueError):
+            return Response({'error': 'quantity must be a whole number'}, status=status.HTTP_400_BAD_REQUEST)
+        if quantity <= 0:
+            return Response({'error': 'quantity must be greater than zero'}, status=status.HTTP_400_BAD_REQUEST)
 
-        # Create batch
+        from django.db import transaction
+        from inventory import stock
         from inventory.models import Batch
-        batch = Batch.objects.create(
-            product=item.product,
-            batch_number=batch_number,
-            quantity=quantity,
-            expiry_date=expiry_date,
-            purchase_date=purchase_order.order_date,
-            supplier=purchase_order.supplier,
-            purchase_order_item=item,
-            status='ordered'
-        )
+        with transaction.atomic():
+            item = PurchaseOrderItem.objects.select_for_update().get(pk=item.pk)
+            if item.received_quantity + quantity > item.quantity:
+                return Response({'error': 'Received quantity exceeds ordered quantity'}, status=status.HTTP_400_BAD_REQUEST)
+            batch = Batch.objects.create(
+                product=item.product,
+                batch_number=batch_number,
+                quantity=quantity,
+                expiry_date=expiry_date,
+                purchase_date=purchase_order.order_date,
+                supplier=purchase_order.supplier,
+                purchase_order_item=item,
+                status='ordered'
+            )
 
-        # Receive the batch (adds to stock and updates received_quantity)
-        batch.receive_batch()
+            # Receive the batch (adds to stock and updates received_quantity)
+            stock.receive_batch(batch, quantity, user=getattr(request.user, 'userprofile', None))
 
         return Response({'message': 'Batch received successfully', 'batch_id': batch.id})
 

@@ -34,28 +34,12 @@ class Product(models.Model):
         return self.stock_quantity <= self.low_stock_threshold
 
     def recalculate_stock_from_batches(self):
-        """Recalculate stock_quantity from actual batch quantities"""
-        from django.utils import timezone
-        from django.db.models import Sum
-        
-        # Get sum of all received batches (excluding damaged/expired)
-        total_from_batches = self.batch_set.filter(
-            status='received'
-        ).exclude(
-            status__in=['damaged', 'expired'],
-            expiry_date__lt=timezone.now().date()
-        ).aggregate(total=Sum('quantity'))['total'] or 0
-        
-        # Update stock_quantity
-        self.stock_quantity = total_from_batches
-        self.save(update_fields=['stock_quantity'])
-        
-        return total_from_batches
+        """Report-only comparison of stock vs received batches (never writes).
 
-    @property
-    def actual_stock(self):
-        """Get actual available stock from batches"""
-        return self.recalculate_stock_from_batches()
+        Use inventory.stock.reconcile(product, apply=True) inside a transaction to apply.
+        """
+        from .stock import reconcile
+        return reconcile(self)['batch_total']
 
     def save(self, *args, **kwargs):
         # Track changes for history logging
@@ -133,37 +117,15 @@ class Batch(models.Model):
     def __str__(self):
         return f"{self.product.name} - Batch {self.batch_number}"
 
-    def receive_batch(self, actual_quantity=None):
-        """Mark batch as received and add to stock"""
-        from django.utils import timezone
-        from .models import StockMovement
-
-        if self.status != 'received':
-            quantity_to_add = actual_quantity if actual_quantity is not None else self.quantity
-
-            self.status = 'received'
-            if not self.received_date:
-                self.received_date = timezone.now().date()
-            self.save()
-
-            # Add to product stock
-            self.product.stock_quantity += quantity_to_add
-            self.product.save()
-
-            # Create stock movement record
-            StockMovement.objects.create(
-                product=self.product,
-                movement_type='in',
-                quantity=quantity_to_add,
-                reason=f'Batch {self.batch_number} received',
-                user=None  # TODO: Add user when authentication is available
-            )
-
-            # Update purchase order item
-            if self.purchase_order_item:
-                self.purchase_order_item.received_quantity += quantity_to_add
-                self.purchase_order_item.save()
-                self.purchase_order_item.purchase_order.update_status()
+    def receive_batch(self, actual_quantity=None, user=None):
+        """Mark batch as received and add to stock (delegates to inventory.stock)."""
+        from django.db import transaction
+        from .stock import receive_batch
+        with transaction.atomic():
+            qty = self.quantity if actual_quantity is None else actual_quantity
+            received = receive_batch(self, qty, user=user)
+        self.refresh_from_db()
+        return received
 
 class StockMovement(models.Model):
     MOVEMENT_TYPES = [
@@ -176,7 +138,7 @@ class StockMovement(models.Model):
     movement_type = models.CharField(max_length=10, choices=MOVEMENT_TYPES)
     quantity = models.IntegerField()  # positive for in, negative for out
     reason = models.CharField(max_length=200, blank=True)
-    created_at = models.DateTimeField(auto_now_add=True)
+    created_at = models.DateTimeField(auto_now_add=True, db_index=True)
     user = models.ForeignKey('users.UserProfile', on_delete=models.SET_NULL, null=True)
 
     def __str__(self):
@@ -223,8 +185,8 @@ class SalesHistory(models.Model):
     cost_price = models.DecimalField(max_digits=10, decimal_places=2, null=True, blank=True)  # Cost from batch
     total_price = models.DecimalField(max_digits=10, decimal_places=2)
     profit = models.DecimalField(max_digits=10, decimal_places=2, null=True, blank=True)
-    sale_date = models.DateTimeField(auto_now_add=True)
-    receipt_number = models.CharField(max_length=50)
+    sale_date = models.DateTimeField(auto_now_add=True, db_index=True)
+    receipt_number = models.CharField(max_length=50, db_index=True)
 
     def save(self, *args, **kwargs):
         if self.cost_price and self.unit_price:
