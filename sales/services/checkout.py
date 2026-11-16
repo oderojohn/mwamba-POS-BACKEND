@@ -63,10 +63,8 @@ def get_profile(user):
 
 
 def is_manager(user):
-    if user.is_superuser:
-        return True
-    profile = getattr(user, 'userprofile', None)
-    return bool(profile and profile.role in MANAGER_ROLES)
+    from users.permissions import has_manager_rights
+    return has_manager_rights(user)
 
 
 def _unit_price(product, sale_type):

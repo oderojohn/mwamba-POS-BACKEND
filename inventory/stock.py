@@ -210,18 +210,42 @@ def remove_batch(batch, *, user, reason):
 
 
 def adjust(product, delta, *, user, reason):
-    """Manual adjustment of unbatched stock (count corrections etc.)."""
+    """Manual stock correction (count corrections etc.); callers gate it to managers/admins.
+
+    Increases are added as unbatched stock.  Decreases come out of unbatched
+    stock first, then out of received batches oldest-expiry first (expired
+    batches included, since they are still counted on hand), so batch
+    quantities never exceed the product total.  Stock cannot go below zero.
+    """
     _require_atomic()
     product = lock_products([product.pk])[product.pk]
     delta = int(delta)
     if delta == 0:
         return product
     new_qty = int(product.stock_quantity) + delta
-    if delta < 0 and -delta > unbatched_quantity(product):
+    if new_qty < 0:
         raise InsufficientStock(
-            f'Cannot remove {-delta} units of "{product.name}": only '
-            f'{unbatched_quantity(product)} units are not attributed to a batch')
-    _movement(product, delta, 'adjustment', reason, user)
+            f'Cannot remove {-delta} units of "{product.name}": only {product.stock_quantity} in stock')
+    if delta > 0:
+        _movement(product, delta, 'adjustment', reason, user)
+    else:
+        to_remove = -delta
+        from_unbatched = min(to_remove, unbatched_quantity(product))
+        if from_unbatched:
+            _movement(product, -from_unbatched, 'adjustment', reason, user)
+        remaining = to_remove - from_unbatched
+        if remaining:
+            batches = Batch.objects.select_for_update().filter(
+                product=product, status='received', quantity__gt=0
+            ).order_by('expiry_date', 'purchase_date', 'id')
+            for batch in batches:
+                if remaining <= 0:
+                    break
+                take = min(remaining, batch.quantity)
+                batch.quantity -= take
+                batch.save(update_fields=['quantity'])
+                _movement(product, -take, 'adjustment', f'{reason} - Batch {batch.batch_number}', user)
+                remaining -= take
     _set_product_stock(product, new_qty, user, reason)
     return product
 

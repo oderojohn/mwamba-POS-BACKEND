@@ -56,6 +56,28 @@ class StockServiceTests(TestCase):
         self.sell(3)
         self.assertEqual(self.p.stock_quantity, 1)
 
+    def adjust(self, delta):
+        with transaction.atomic():
+            stock.adjust(self.p, delta, user=None, reason='Count correction')
+        self.p.refresh_from_db()
+
+    def test_adjust_down_takes_unbatched_then_oldest_batches(self):
+        later = self.batch(5, expiry=date.today() + timedelta(days=60))
+        sooner = self.batch(5, expiry=date.today() + timedelta(days=10))
+        Product.objects.filter(pk=self.p.pk).update(stock_quantity=12)  # 2 unbatched
+        self.adjust(-9)
+        sooner.refresh_from_db(); later.refresh_from_db()
+        self.assertEqual(self.p.stock_quantity, 3)
+        self.assertEqual((sooner.quantity, later.quantity), (0, 3))
+        self.assertEqual(stock.unbatched_quantity(self.p), 0)
+
+    def test_adjust_cannot_go_below_zero(self):
+        self.batch(4)
+        with self.assertRaises(stock.InsufficientStock):
+            self.adjust(-5)
+        self.p.refresh_from_db()
+        self.assertEqual(self.p.stock_quantity, 4)
+
     def test_restore_returns_units_to_original_batch(self):
         b = self.batch(5)
         self.sell(4)

@@ -66,8 +66,8 @@ def _profile(user):
 
 
 def _is_manager(user):
-    p = _profile(user)
-    return user.is_superuser or bool(p and p.role in ('admin', 'manager'))
+    from users.permissions import has_manager_rights
+    return has_manager_rights(user)
 
 
 def _target_profile(request):
